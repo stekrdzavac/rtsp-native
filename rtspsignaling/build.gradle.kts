@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.signaling"
+    namespace = "com.skrdzavac.rtspnative.signaling"
     compileSdk = 36
 
     defaultConfig {

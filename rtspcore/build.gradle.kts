@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.core"
+    namespace = "com.skrdzavac.rtspnative.core"
     compileSdk = 36
 
     defaultConfig {

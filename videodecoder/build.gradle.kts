@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.videodecoder"
+    namespace = "com.skrdzavac.rtspnative.videodecoder"
     compileSdk = 36
 
     defaultConfig {

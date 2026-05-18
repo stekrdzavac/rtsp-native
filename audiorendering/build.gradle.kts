@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.audiorendering"
+    namespace = "com.skrdzavac.rtspnative.audiorendering"
     compileSdk = 36
 
     defaultConfig {

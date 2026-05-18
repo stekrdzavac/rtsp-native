@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.h264"
+    namespace = "com.skrdzavac.rtspnative.h264"
     compileSdk = 36
 
     defaultConfig {

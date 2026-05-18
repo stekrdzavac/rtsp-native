@@ -6,7 +6,7 @@ no C/C++, no JNI, no bundled codecs.
 
 ## What this project is
 
-- A reusable Android library (the `rtspkit` module is the public entry point)
+- A reusable Android library (the `rtsp` module is the public entry point)
 - Plus a `sample` app that demonstrates a minimal player
 - Target: Android `minSdk 24`, `compileSdk 35`, Kotlin 2.0, Java 17
 
@@ -81,7 +81,7 @@ The codebase mirrors the streaming pipeline. Each layer depends only on
 
 ```
 sample
-  └─ rtspkit                          (orchestration: RtspSession)
+  └─ rtsp                             (orchestration: RtspSession)
        ├─ rtspsignaling               (RTSP control + SDP + auth)
        ├─ rtsptransport               (UDP / TCP-interleaved RTP/RTCP I/O)
        ├─ h264depacketizer            (NAL reassembly: single / STAP-A / FU-A)
@@ -101,7 +101,7 @@ Rules of thumb:
 - A transport must not know about codecs
 - `rtspcore` is the only module everyone can depend on
 - New protocol-level concerns live in `rtspsignaling` or `rtspcore`, not in
-  `rtspkit`
+  `rtsp`
 
 ### 6. Concurrency model
 
@@ -117,7 +117,7 @@ The library's public entry points (anything outside these is internal):
 
 - `RtspSession` — create, configure, `start()`, observe `state` and
   `statistics`, `stop()`
-  (`rtspkit/src/main/kotlin/com/nittbit/rtspkit/RtspSession.kt`)
+  (`rtsp/src/main/kotlin/com/skrdzavac/rtspnative/RtspSession.kt`)
 - `RtspSessionConfiguration`, `ReconnectPolicy`, `BufferingPolicy` — knobs
 - `RtspVideoView` / `RtspTextureView` — view to `attach(session)`
 - `RtspAudioRenderer` — audio output sink

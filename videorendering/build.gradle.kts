@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.videorendering"
+    namespace = "com.skrdzavac.rtspnative.videorendering"
     compileSdk = 36
 
     defaultConfig {
@@ -27,7 +27,7 @@ android {
 
 dependencies {
     api(project(":rtspcore"))
-    api(project(":rtspkit"))
+    api(project(":rtsp"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 

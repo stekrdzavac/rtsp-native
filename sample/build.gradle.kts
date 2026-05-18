@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.sample"
+    namespace = "com.skrdzavac.rtspnative.sample"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.nittbit.rtspkit.sample"
+        applicationId = "com.skrdzavac.rtspnative.sample"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
@@ -41,7 +41,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":rtspkit"))
+    implementation(project(":rtsp"))
     implementation(project(":videorendering"))
 
     implementation(libs.androidx.core.ktx)

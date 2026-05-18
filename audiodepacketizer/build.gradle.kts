@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.audiodepacketizer"
+    namespace = "com.skrdzavac.rtspnative.audiodepacketizer"
     compileSdk = 36
 
     defaultConfig {

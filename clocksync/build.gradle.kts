@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.clocksync"
+    namespace = "com.skrdzavac.rtspnative.clocksync"
     compileSdk = 36
 
     defaultConfig {

@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit.transport"
+    namespace = "com.skrdzavac.rtspnative.transport"
     compileSdk = 36
 
     defaultConfig {
