@@ -152,6 +152,9 @@ object Sdp {
             AudioCodec.PCMU, AudioCodec.PCMA -> 8_000
             AudioCodec.L16, AudioCodec.AAC -> 44_100
         }
+        val sizeLength = fmtp["sizeLength"]?.toIntOrNull() ?: 13
+        val indexLength = fmtp["indexLength"]?.toIntOrNull() ?: 3
+        val indexDeltaLength = fmtp["indexDeltaLength"]?.toIntOrNull() ?: indexLength
         return TrackInfo.Audio(
             payloadType = pt,
             codec = codec,
@@ -159,6 +162,9 @@ object Sdp {
             controlUrl = control,
             channels = channels,
             configBytes = configBytes,
+            sizeLength = sizeLength,
+            indexLength = indexLength,
+            indexDeltaLength = indexDeltaLength,
         )
     }
 }

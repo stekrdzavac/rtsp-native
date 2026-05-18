@@ -30,6 +30,10 @@ sealed class TrackInfo {
         override val controlUrl: String,
         val channels: Int = 1,
         val configBytes: ByteArray? = null,
+        // RFC 3640 AAC fmtp parameters (defaults match AAC-hbr mode)
+        val sizeLength: Int = 13,
+        val indexLength: Int = 3,
+        val indexDeltaLength: Int = 3,
     ) : TrackInfo()
 }
 

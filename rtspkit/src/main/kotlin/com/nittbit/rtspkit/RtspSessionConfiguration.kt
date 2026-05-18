@@ -19,7 +19,7 @@ data class RtspSessionConfiguration(
     val url: String,
     val credentials: Credentials? = null,
     val transport: TransportPreference = TransportPreference.TcpInterleaved,
-    val videoOnly: Boolean = true,
+    val videoOnly: Boolean = false,
     val connectTimeoutMs: Int = 8_000,
     val firstFrameTimeoutMs: Int = 10_000,
     val keepaliveIntervalMs: Long = 30_000,

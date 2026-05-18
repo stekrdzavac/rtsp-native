@@ -21,18 +21,20 @@ class RtspClient(
     suspend fun handshake(videoOnly: Boolean = true): HandshakeResult {
         options()
         val tracks = describe()
-        val playableTracks = tracks.filter { videoOnly || it is TrackInfo.Video || it is TrackInfo.Audio }
-        if (playableTracks.isEmpty()) {
-            throw RtspError.Protocol("no playable tracks in SDP")
-        }
-        // Stage 1: video only — pick the first video track. Both H.264 and
-        // H.265 are accepted; the session picks the right pipeline downstream.
-        val target = playableTracks.firstOrNull { it is TrackInfo.Video }
-            ?: throw RtspError.Protocol("no video track in SDP")
+        if (tracks.isEmpty()) throw RtspError.Protocol("no playable tracks in SDP")
 
-        val negotiated = setup(target, rtpChannel = 0, rtcpChannel = 1)
-        play(negotiated.sessionId)
-        return HandshakeResult(negotiated)
+        val video = tracks.firstOrNull { it is TrackInfo.Video }
+            ?: throw RtspError.Protocol("no video track in SDP")
+        val negotiatedVideo = setup(video, rtpChannel = 0, rtcpChannel = 1)
+
+        val negotiatedAudio = if (!videoOnly) {
+            tracks.firstOrNull { it is TrackInfo.Audio }?.let { audio ->
+                runCatching { setup(audio, rtpChannel = 2, rtcpChannel = 3) }.getOrNull()
+            }
+        } else null
+
+        play(negotiatedVideo.sessionId)
+        return HandshakeResult(videoTrack = negotiatedVideo, audioTrack = negotiatedAudio)
     }
 
     suspend fun keepalive() {
@@ -139,5 +141,8 @@ class RtspClient(
         return rtp to rtcp
     }
 
-    data class HandshakeResult(val videoTrack: NegotiatedTrack)
+    data class HandshakeResult(
+        val videoTrack: NegotiatedTrack,
+        val audioTrack: NegotiatedTrack? = null,
+    )
 }

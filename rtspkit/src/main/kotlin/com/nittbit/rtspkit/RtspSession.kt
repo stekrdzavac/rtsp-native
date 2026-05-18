@@ -2,13 +2,16 @@ package com.nittbit.rtspkit
 
 import android.util.Log
 import android.view.Surface
+import com.nittbit.rtspkit.audiorendering.RtspAudioRenderer
 import com.nittbit.rtspkit.clocksync.ClockSync
+import com.nittbit.rtspkit.core.AudioCodec
 import com.nittbit.rtspkit.core.RtcpPacket
 import com.nittbit.rtspkit.core.RtpPacket
 import com.nittbit.rtspkit.core.RtspError
 import com.nittbit.rtspkit.core.RtspSessionState
 import com.nittbit.rtspkit.core.SessionStatistics
 import com.nittbit.rtspkit.core.VideoCodec
+import com.nittbit.rtspkit.signaling.NegotiatedTrack
 import com.nittbit.rtspkit.signaling.RtspClient
 import com.nittbit.rtspkit.signaling.TrackInfo
 import com.nittbit.rtspkit.transport.InterleavedFrame
@@ -29,15 +32,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 
 /**
- * Public entry point for playing an RTSP/H.264 or RTSP/H.265 stream.
- * Stage 1 + Stage 2 (H.265) support a single video track over
- * TCP-interleaved transport. Construct → [start] → attach a Surface (via
+ * Public entry point for playing an RTSP stream. Supports H.264 / H.265
+ * video and AAC / G.711 / L16 audio over TCP-interleaved transport.
+ * Construct → [start] → attach a Surface (via
  * [com.nittbit.rtspkit.videorendering.RtspVideoView]) → observe [state]
  * and [statistics] → [stop].
- *
- * The session owns its own coroutine scope. Calling [stop] (or any
- * unrecoverable error path) cancels it, closes the socket, and releases
- * the decoder.
  */
 class RtspSession(private val config: RtspSessionConfiguration) {
 
@@ -58,9 +57,13 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private val _videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val videoSize: StateFlow<Pair<Int, Int>?> = _videoSize
 
+    /** Mute / volume / lifecycle of audio output. */
+    val audioRenderer: RtspAudioRenderer = RtspAudioRenderer()
+
     private var transport: TcpInterleavedTransport? = null
     private var rtspClient: RtspClient? = null
-    private var pipeline: VideoPipeline? = null
+    private var videoPipeline: VideoPipeline? = null
+    private var audioPipeline: AudioPipeline? = null
     private var clockSync: ClockSync? = null
 
     private val surfaceReady = CompletableDeferred<Surface>()
@@ -86,7 +89,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         if (!surfaceReady.isCompleted) {
             surfaceReady.complete(surface)
         } else {
-            pipeline?.replaceSurface(surface)
+            videoPipeline?.replaceSurface(surface)
         }
     }
 
@@ -108,53 +111,61 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             rtspClient = client
 
             _state.value = RtspSessionState.Negotiating
-            val rtpChannel = 0
-            val rtcpChannel = 1
+            val videoRtpChannel = 0
+            val videoRtcpChannel = 1
+            val audioRtpChannel = 2
+            val audioRtcpChannel = 3
 
-            // Pipeline is allocated lazily once we know the codec from SDP.
-            // Subscribe to RTP/RTCP NOW so frames after PLAY aren't lost.
+            // Subscribe to all four interleaved channels BEFORE PLAY so
+            // frames aren't dropped during the SharedFlow's no-subscriber
+            // window.
             scope.launch(Dispatchers.Default) {
-                tx.frames
-                    .filter { it.channel == rtpChannel }
-                    .collect { frame -> handleRtp(frame) }
+                tx.frames.filter { it.channel == videoRtpChannel }.collect { handleVideoRtp(it) }
             }
             scope.launch(Dispatchers.Default) {
-                tx.frames
-                    .filter { it.channel == rtcpChannel }
-                    .collect { frame -> handleRtcp(frame) }
+                tx.frames.filter { it.channel == videoRtcpChannel }.collect { handleRtcp(it) }
+            }
+            scope.launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == audioRtpChannel }.collect { handleAudioRtp(it) }
+            }
+            scope.launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == audioRtcpChannel }.collect {
+                    /* audio RTCP — Stage 2 ignores; clock is anchored to the video track */
+                }
             }
 
-            val handshake = client.handshake(videoOnly = true)
-            val track = handshake.videoTrack
-            val videoTrack = track.info as TrackInfo.Video
-            Log.i(TAG, "handshake complete: codec=${videoTrack.codec}, channels rtp=${track.rtpChannel}/rtcp=${track.rtcpChannel}")
+            val handshake = client.handshake(videoOnly = config.videoOnly)
+            val videoTrack = handshake.videoTrack
+            val videoInfo = videoTrack.info as TrackInfo.Video
+            val audioInfo = (handshake.audioTrack?.info as? TrackInfo.Audio)
+            Log.i(TAG, "handshake complete: video=${videoInfo.codec}, audio=${audioInfo?.codec}")
 
-            val pl: VideoPipeline = when (videoTrack.codec) {
-                VideoCodec.H264 -> H264Pipeline(scope)
-                VideoCodec.H265 -> H265Pipeline(scope)
-            }
-            pl.seedFromSdp(videoTrack)
-            pipeline = pl
-
-            clockSync = ClockSync(videoTrack.clockRate)
+            videoPipeline = buildVideoPipeline(videoInfo)
+            audioPipeline = handshake.audioTrack?.let { buildAudioPipeline(it) }
+            clockSync = ClockSync(videoInfo.clockRate)
 
             Log.i(TAG, "waiting for Surface (timeout=${config.firstFrameTimeoutMs}ms)")
             val surface = withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
                 surfaceReady.await()
             } ?: throw RtspError.Timeout("no Surface attached within ${config.firstFrameTimeoutMs}ms")
 
-            if (pl.canStart()) {
-                Log.i(TAG, "starting ${videoTrack.codec} decoder with SDP-derived params")
-                pl.start(surface)
+            videoPipeline?.let { vp ->
+                if (vp.canStart()) {
+                    Log.i(TAG, "starting ${videoInfo.codec} decoder with SDP-derived params")
+                    vp.start(surface)
+                }
+                scope.launch {
+                    vp.dimensions.filterNotNull().collect { (w, h) ->
+                        _videoSize.value = w to h
+                        _statistics.value = _statistics.value.copy(videoWidth = w, videoHeight = h)
+                    }
+                }
             }
 
-            scope.launch {
-                pl.dimensions.filterNotNull().collect { (w, h) ->
-                    _videoSize.value = w to h
-                    _statistics.value = _statistics.value.copy(
-                        videoWidth = w,
-                        videoHeight = h,
-                    )
+            audioPipeline?.let { ap ->
+                if (ap.canStart()) {
+                    Log.i(TAG, "starting audio decoder (${audioInfo?.codec})")
+                    ap.start()
                 }
             }
 
@@ -173,15 +184,31 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         }
     }
 
-    private fun handleRtp(frame: InterleavedFrame) {
+    private fun buildVideoPipeline(track: TrackInfo.Video): VideoPipeline {
+        val pl: VideoPipeline = when (track.codec) {
+            VideoCodec.H264 -> H264Pipeline(scope)
+            VideoCodec.H265 -> H265Pipeline(scope)
+        }
+        pl.seedFromSdp(track)
+        return pl
+    }
+
+    private fun buildAudioPipeline(negotiated: NegotiatedTrack): AudioPipeline? {
+        val info = negotiated.info as? TrackInfo.Audio ?: return null
+        return when (info.codec) {
+            AudioCodec.AAC -> AacPipeline(scope, info, audioRenderer)
+            AudioCodec.PCMU, AudioCodec.PCMA -> G711Pipeline(info, audioRenderer)
+            AudioCodec.L16 -> L16Pipeline(info, audioRenderer)
+        }
+    }
+
+    private fun handleVideoRtp(frame: InterleavedFrame) {
         val packet = RtpPacket.parse(frame.payload) ?: return
-        val pl = pipeline ?: return
+        val pl = videoPipeline ?: return
         val aus = pl.depacketize(packet)
         if (aus.isEmpty()) return
 
         if (!pl.isStarted() && pl.canStart()) {
-            // Lazy start when in-band parameter sets arrive (cameras whose
-            // SDP omits sprop-* parameter sets).
             val surface = if (surfaceReady.isCompleted) {
                 runCatching { surfaceReady.getCompleted() }.getOrNull()
             } else null
@@ -196,6 +223,15 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             )
             pl.feed(au)
         }
+    }
+
+    private fun handleAudioRtp(frame: InterleavedFrame) {
+        val packet = RtpPacket.parse(frame.payload) ?: return
+        val pl = audioPipeline ?: return
+        val aus = pl.depacketize(packet)
+        if (aus.isEmpty()) return
+        if (!pl.isStarted() && pl.canStart()) pl.start()
+        for (au in aus) pl.feed(au)
     }
 
     private fun handleRtcp(frame: InterleavedFrame) {
@@ -213,8 +249,11 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     }
 
     private fun cleanup() {
-        runCatching { pipeline?.release() }
-        pipeline = null
+        runCatching { videoPipeline?.release() }
+        videoPipeline = null
+        runCatching { audioPipeline?.release() }
+        audioPipeline = null
+        runCatching { audioRenderer.release() }
         runCatching { transport?.close() }
         transport = null
         rtspClient = null
