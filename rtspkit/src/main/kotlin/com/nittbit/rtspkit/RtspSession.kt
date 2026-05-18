@@ -5,6 +5,7 @@ import android.view.Surface
 import com.nittbit.rtspkit.audiorendering.RtspAudioRenderer
 import com.nittbit.rtspkit.clocksync.ClockSync
 import com.nittbit.rtspkit.core.AudioCodec
+import com.nittbit.rtspkit.core.ReconnectPolicy
 import com.nittbit.rtspkit.core.RtcpPacket
 import com.nittbit.rtspkit.core.RtpPacket
 import com.nittbit.rtspkit.core.RtspError
@@ -16,11 +17,15 @@ import com.nittbit.rtspkit.signaling.RtspClient
 import com.nittbit.rtspkit.signaling.TrackInfo
 import com.nittbit.rtspkit.transport.InterleavedFrame
 import com.nittbit.rtspkit.transport.TcpInterleavedTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,13 +35,22 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
+import kotlin.random.Random
 
 /**
  * Public entry point for playing an RTSP stream. Supports H.264 / H.265
  * video and AAC / G.711 / L16 audio over TCP-interleaved transport.
- * Construct → [start] → attach a Surface (via
- * [com.nittbit.rtspkit.videorendering.RtspVideoView]) → observe [state]
- * and [statistics] → [stop].
+ *
+ * Includes reconnect-on-failure per [RtspSessionConfiguration.reconnect].
+ * Transient drops (camera reboot, WiFi blip, NVR rotating sessions) are
+ * detected via:
+ *   - stall: no RTP frames in [stallThresholdMs] while in Playing
+ *   - keepalive failure: GET_PARAMETER errors after Playing
+ *
+ * On detection: partial-cleanup (transport + decoders released, the
+ * audio renderer is kept so the AudioTrack is reused), wait per backoff,
+ * try again. Authentication failures and explicit `stop()` short-circuit
+ * retry.
  */
 class RtspSession(private val config: RtspSessionConfiguration) {
 
@@ -57,7 +71,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private val _videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val videoSize: StateFlow<Pair<Int, Int>?> = _videoSize
 
-    /** Mute / volume / lifecycle of audio output. */
+    /** Mute / volume of audio output. Survives reconnects. */
     val audioRenderer: RtspAudioRenderer = RtspAudioRenderer()
 
     private var transport: TcpInterleavedTransport? = null
@@ -68,17 +82,34 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private val surfaceReady = CompletableDeferred<Surface>()
 
+    @Volatile private var stopRequested = false
+    @Volatile private var lastRtpFrameAt: Long = 0
+    @Volatile private var pipelineHealth: CompletableDeferred<Unit>? = null
+    private var lifecycleJob: Job? = null
+
+    /** A stall is "much longer than the policy's user-facing stall timeout". */
+    private val stallThresholdMs: Long
+        get() = (config.bufferingPolicy.stallTimeoutMs * 10L).coerceAtLeast(5_000L)
+
     fun start() {
-        if (_state.value !is RtspSessionState.Idle &&
-            _state.value !is RtspSessionState.Stopped &&
-            _state.value !is RtspSessionState.Failed
-        ) return
-        scope.launch { runPipeline() }
+        if (lifecycleJob?.isActive == true) return
+        if (stopRequested) return
+        lifecycleJob = scope.launch { runWithReconnect() }
     }
 
     fun stop() {
+        if (stopRequested) return
+        stopRequested = true
+        val rc = rtspClient
+        val health = pipelineHealth
+        val lifecycle = lifecycleJob
         scope.launch {
-            runCatching { rtspClient?.teardown() }
+            // Send TEARDOWN while connection is still up.
+            runCatching { rc?.teardown() }
+            // Trip the current attempt's await (if any).
+            health?.completeExceptionally(RtspError.Cancelled())
+            // Wait for the reconnect loop to exit cleanly.
+            runCatching { lifecycle?.cancelAndJoin() }
             cleanup()
             _state.value = RtspSessionState.Stopped
         }
@@ -97,7 +128,42 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         Log.i(TAG, "detachSurface")
     }
 
-    private suspend fun runPipeline() {
+    private suspend fun runWithReconnect() {
+        var attempt = 0
+        while (!stopRequested) {
+            try {
+                runOnePipeline()
+                // runOnePipeline only returns normally when health.await()
+                // completed without exception, which shouldn't happen —
+                // treat as a clean exit.
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RtspError.Cancelled) {
+                return
+            } catch (e: RtspError.Auth) {
+                Log.i(TAG, "auth failed; not reconnecting")
+                fail(e)
+                return
+            } catch (e: Throwable) {
+                if (stopRequested) return
+                attempt++
+                partialCleanup()
+                val backoff = nextBackoff(attempt) ?: run {
+                    fail(e)
+                    return
+                }
+                _state.value = RtspSessionState.Reconnecting
+                Log.i(TAG, "reconnecting in ${backoff}ms (attempt $attempt): ${e.message}")
+                delay(backoff)
+            }
+        }
+    }
+
+    private suspend fun runOnePipeline() = coroutineScope {
+        val health = CompletableDeferred<Unit>()
+        pipelineHealth = health
+
         try {
             _state.value = RtspSessionState.Connecting
             val (host, port) = parseHostPort(config.url)
@@ -111,32 +177,25 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             rtspClient = client
 
             _state.value = RtspSessionState.Negotiating
-            val videoRtpChannel = 0
-            val videoRtcpChannel = 1
-            val audioRtpChannel = 2
-            val audioRtcpChannel = 3
 
-            // Subscribe to all four interleaved channels BEFORE PLAY so
-            // frames aren't dropped during the SharedFlow's no-subscriber
-            // window.
-            scope.launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == videoRtpChannel }.collect { handleVideoRtp(it) }
+            // Subscribe to interleaved channels BEFORE PLAY. These collectors
+            // are children of this coroutineScope, so they die automatically
+            // between reconnect attempts.
+            launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == 0 }.collect { handleVideoRtp(it) }
             }
-            scope.launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == videoRtcpChannel }.collect { handleRtcp(it) }
+            launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == 1 }.collect { handleRtcp(it) }
             }
-            scope.launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == audioRtpChannel }.collect { handleAudioRtp(it) }
+            launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == 2 }.collect { handleAudioRtp(it) }
             }
-            scope.launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == audioRtcpChannel }.collect {
-                    /* audio RTCP — Stage 2 ignores; clock is anchored to the video track */
-                }
+            launch(Dispatchers.Default) {
+                tx.frames.filter { it.channel == 3 }.collect { /* audio RTCP ignored Stage 2 */ }
             }
 
             val handshake = client.handshake(videoOnly = config.videoOnly)
-            val videoTrack = handshake.videoTrack
-            val videoInfo = videoTrack.info as TrackInfo.Video
+            val videoInfo = handshake.videoTrack.info as TrackInfo.Video
             val audioInfo = (handshake.audioTrack?.info as? TrackInfo.Audio)
             Log.i(TAG, "handshake complete: video=${videoInfo.codec}, audio=${audioInfo?.codec}")
 
@@ -154,7 +213,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                     Log.i(TAG, "starting ${videoInfo.codec} decoder with SDP-derived params")
                     vp.start(surface)
                 }
-                scope.launch {
+                launch {
                     vp.dimensions.filterNotNull().collect { (w, h) ->
                         _videoSize.value = w to h
                         _statistics.value = _statistics.value.copy(videoWidth = w, videoHeight = h)
@@ -169,18 +228,49 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 }
             }
 
-            scope.launch(Dispatchers.IO) {
+            // Keepalive — escalates failures to the health monitor.
+            launch(Dispatchers.IO) {
                 while (isActive) {
                     delay(config.keepaliveIntervalMs)
-                    runCatching { client.keepalive() }
+                    val result = runCatching { client.keepalive() }
+                    if (result.isFailure && !health.isCompleted) {
+                        health.completeExceptionally(
+                            RtspError.Network("keepalive failed", result.exceptionOrNull())
+                        )
+                        return@launch
+                    }
                 }
             }
 
+            // Stall detector — only fires once Playing was reached and no
+            // RTP frame has arrived in [stallThresholdMs].
+            launch {
+                while (isActive) {
+                    delay(1_000)
+                    if (_state.value !is RtspSessionState.Playing) {
+                        lastRtpFrameAt = System.currentTimeMillis()
+                        continue
+                    }
+                    val elapsed = System.currentTimeMillis() - lastRtpFrameAt
+                    if (elapsed > stallThresholdMs && !health.isCompleted) {
+                        health.completeExceptionally(
+                            RtspError.Timeout("RTP stall: no frames for ${elapsed}ms")
+                        )
+                        return@launch
+                    }
+                }
+            }
+
+            lastRtpFrameAt = System.currentTimeMillis()
             _state.value = RtspSessionState.Playing
             Log.i(TAG, "session is Playing")
-        } catch (e: Throwable) {
-            Log.e(TAG, "pipeline failed", e)
-            fail(e)
+
+            // Suspend until something completes health exceptionally
+            // (stop(), keepalive failure, stall, or any other coroutine
+            // child failure propagating up).
+            health.await()
+        } finally {
+            pipelineHealth = null
         }
     }
 
@@ -203,6 +293,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     }
 
     private fun handleVideoRtp(frame: InterleavedFrame) {
+        lastRtpFrameAt = System.currentTimeMillis()
         val packet = RtpPacket.parse(frame.payload) ?: return
         val pl = videoPipeline ?: return
         val aus = pl.depacketize(packet)
@@ -226,6 +317,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     }
 
     private fun handleAudioRtp(frame: InterleavedFrame) {
+        lastRtpFrameAt = System.currentTimeMillis()
         val packet = RtpPacket.parse(frame.payload) ?: return
         val pl = audioPipeline ?: return
         val aus = pl.depacketize(packet)
@@ -242,22 +334,46 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         }
     }
 
+    /**
+     * Backoff for the [attempt]th retry (1-based). Returns null if the
+     * policy disallows further retries.
+     */
+    private fun nextBackoff(attempt: Int): Long? {
+        return when (val policy = config.reconnect) {
+            is ReconnectPolicy.Never -> null
+            is ReconnectPolicy.ExponentialBackoff -> {
+                val shift = (attempt - 1).coerceIn(0, 20)
+                val base = (policy.initialMs shl shift).coerceAtMost(policy.maxMs)
+                val jitter = if (policy.jitterMs > 0) {
+                    Random.nextLong(-policy.jitterMs, policy.jitterMs + 1)
+                } else 0L
+                (base + jitter).coerceAtLeast(0L)
+            }
+        }
+    }
+
     private fun fail(t: Throwable) {
         val err = (t as? RtspError) ?: RtspError.Network(t.message ?: "unknown error", t)
         cleanup()
         _state.value = RtspSessionState.Failed(err)
     }
 
-    private fun cleanup() {
+    /** Between reconnect attempts — release transport + decoders, keep the renderer. */
+    private fun partialCleanup() {
         runCatching { videoPipeline?.release() }
         videoPipeline = null
         runCatching { audioPipeline?.release() }
         audioPipeline = null
-        runCatching { audioRenderer.release() }
         runCatching { transport?.close() }
         transport = null
         rtspClient = null
         clockSync = null
+    }
+
+    /** Full cleanup on terminal stop / fail. */
+    private fun cleanup() {
+        partialCleanup()
+        runCatching { audioRenderer.release() }
     }
 
     private fun parseHostPort(url: String): Pair<String, Int> {
