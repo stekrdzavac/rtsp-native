@@ -11,12 +11,15 @@ import com.nittbit.rtspkit.core.RtpPacket
 import com.nittbit.rtspkit.core.RtspError
 import com.nittbit.rtspkit.core.RtspSessionState
 import com.nittbit.rtspkit.core.SessionStatistics
+import com.nittbit.rtspkit.core.TransportPreference
 import com.nittbit.rtspkit.core.VideoCodec
 import com.nittbit.rtspkit.signaling.NegotiatedTrack
 import com.nittbit.rtspkit.signaling.RtspClient
 import com.nittbit.rtspkit.signaling.TrackInfo
 import com.nittbit.rtspkit.transport.InterleavedFrame
+import com.nittbit.rtspkit.transport.RtspTransport
 import com.nittbit.rtspkit.transport.TcpInterleavedTransport
+import com.nittbit.rtspkit.transport.UdpTransport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -80,7 +83,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         presentationAnchor = avSync::anchorPresentation,
     )
 
-    private var transport: TcpInterleavedTransport? = null
+    private var transport: RtspTransport? = null
     private var rtspClient: RtspClient? = null
     private var videoPipeline: VideoPipeline? = null
     private var audioPipeline: AudioPipeline? = null
@@ -176,9 +179,27 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         try {
             _state.value = RtspSessionState.Connecting
             val (host, port) = parseHostPort(config.url)
-            Log.i(TAG, "connecting to $host:$port")
+            // Auto currently maps to TCP-interleaved — the safe default
+            // that works through NAT. A future Stage 3 may make Auto try
+            // UDP first with TCP fallback.
+            val useUdp = when (config.transport) {
+                is TransportPreference.Udp -> true
+                is TransportPreference.TcpInterleaved -> false
+                is TransportPreference.Auto -> false
+            }
+            Log.i(TAG, "connecting to $host:$port (${if (useUdp) "UDP" else "TCP-interleaved"})")
 
-            val tx = TcpInterleavedTransport.connect(host, port, config.connectTimeoutMs, scope)
+            val tx: RtspTransport = if (useUdp) {
+                UdpTransport.connect(
+                    host = host,
+                    port = port,
+                    connectTimeoutMs = config.connectTimeoutMs,
+                    withAudio = !config.videoOnly,
+                    scope = scope,
+                )
+            } else {
+                TcpInterleavedTransport.connect(host, port, config.connectTimeoutMs, scope)
+            }
             transport = tx
 
             _state.value = RtspSessionState.Authenticating
@@ -189,7 +210,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
             // Subscribe to interleaved channels BEFORE PLAY. These collectors
             // are children of this coroutineScope, so they die automatically
-            // between reconnect attempts.
+            // between reconnect attempts. Channel ids are the same shape on
+            // both transports (synthetic 0..3 for UDP).
             launch(Dispatchers.Default) {
                 tx.frames.filter { it.channel == 0 }.collect { handleVideoRtp(it) }
             }
@@ -203,7 +225,12 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 tx.frames.filter { it.channel == 3 }.collect { handleAudioRtcp(it) }
             }
 
-            val handshake = client.handshake(videoOnly = config.videoOnly)
+            val transportBuilder = if (useUdp) buildUdpTransportBuilder(tx as UdpTransport)
+                                   else RtspClient.TransportBuilder.TCP_INTERLEAVED
+            val handshake = client.handshake(
+                videoOnly = config.videoOnly,
+                transportBuilder = transportBuilder,
+            )
             val videoInfo = handshake.videoTrack.info as TrackInfo.Video
             val audioInfo = (handshake.audioTrack?.info as? TrackInfo.Audio)
             Log.i(TAG, "handshake complete: video=${videoInfo.codec}, audio=${audioInfo?.codec}")
@@ -312,6 +339,22 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             pipelineHealth = null
         }
     }
+
+    /**
+     * Returns a [RtspClient.TransportBuilder] that emits a UDP-style
+     * `client_port=X-Y` per track, reading the ports from the bound UDP
+     * sockets.
+     */
+    private fun buildUdpTransportBuilder(udp: UdpTransport): RtspClient.TransportBuilder =
+        RtspClient.TransportBuilder { rtpChannel, _ ->
+            val pair = when (rtpChannel) {
+                0 -> udp.videoSockets
+                2 -> udp.audioSockets
+                    ?: error("audio SETUP requested but no audio UDP socket bound")
+                else -> error("unexpected RTP channel $rtpChannel for UDP transport")
+            }
+            "RTP/AVP;unicast;client_port=${pair.rtpPort}-${pair.rtcpPort}"
+        }
 
     private fun buildVideoPipeline(track: TrackInfo.Video): VideoPipeline {
         val pl: VideoPipeline = when (track.codec) {

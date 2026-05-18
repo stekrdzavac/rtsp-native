@@ -34,13 +34,13 @@ class TcpInterleavedTransport private constructor(
     private val input: InputStream,
     private val output: OutputStream,
     scope: CoroutineScope,
-) : RtspMessageChannel {
+) : RtspTransport {
 
     private val _frames = MutableSharedFlow<InterleavedFrame>(
         replay = 0,
         extraBufferCapacity = 512,
     )
-    val frames: SharedFlow<InterleavedFrame> = _frames.asSharedFlow()
+    override val frames: SharedFlow<InterleavedFrame> = _frames.asSharedFlow()
 
     private val responses = Channel<RtspResponse>(capacity = Channel.UNLIMITED)
     private val closed = AtomicBoolean(false)

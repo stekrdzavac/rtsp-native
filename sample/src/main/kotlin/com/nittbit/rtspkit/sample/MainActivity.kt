@@ -36,6 +36,11 @@ import com.nittbit.rtspkit.core.Credentials
 import com.nittbit.rtspkit.core.RtspSessionState
 import com.nittbit.rtspkit.videorendering.RtspVideoSurface
 
+private const val SAMPLE_H264_RTSP_URL =
+    "rtsp://admin:Admin12345@192.168.0.203/Streaming/Channels/101?transportmode=unicast&profile=Profile_1"
+private const val SAMPLE_H265_RTSP_URL =
+    "rtsp://admin:Admin12345@lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1"
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,7 +57,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SampleScreen() {
-    var url by remember { mutableStateOf("rtsp://lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1") }
+    var url by remember { mutableStateOf( SAMPLE_H265_RTSP_URL)}
     var username by remember { mutableStateOf("admin") }
     var password by remember { mutableStateOf("Admin12345") }
     var session by remember { mutableStateOf<RtspSession?>(null) }

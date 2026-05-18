@@ -18,18 +18,33 @@ class RtspClient(
     private var lastChallenge: AuthChallenge? = null
     private var sessionId: String? = null
 
-    suspend fun handshake(videoOnly: Boolean = true): HandshakeResult {
+    suspend fun handshake(
+        videoOnly: Boolean = true,
+        transportBuilder: TransportBuilder = TransportBuilder.TCP_INTERLEAVED,
+    ): HandshakeResult {
         options()
         val tracks = describe()
         if (tracks.isEmpty()) throw RtspError.Protocol("no playable tracks in SDP")
 
         val video = tracks.firstOrNull { it is TrackInfo.Video }
             ?: throw RtspError.Protocol("no video track in SDP")
-        val negotiatedVideo = setup(video, rtpChannel = 0, rtcpChannel = 1)
+        val negotiatedVideo = setup(
+            track = video,
+            rtpChannel = 0,
+            rtcpChannel = 1,
+            transportHeader = transportBuilder.build(rtpChannel = 0, rtcpChannel = 1),
+        )
 
         val negotiatedAudio = if (!videoOnly) {
             tracks.firstOrNull { it is TrackInfo.Audio }?.let { audio ->
-                runCatching { setup(audio, rtpChannel = 2, rtcpChannel = 3) }.getOrNull()
+                runCatching {
+                    setup(
+                        track = audio,
+                        rtpChannel = 2,
+                        rtcpChannel = 3,
+                        transportHeader = transportBuilder.build(rtpChannel = 2, rtcpChannel = 3),
+                    )
+                }.getOrNull()
             }
         } else null
 
@@ -60,15 +75,23 @@ class RtspClient(
         return Sdp.parse(sdp)
     }
 
-    private suspend fun setup(track: TrackInfo, rtpChannel: Int, rtcpChannel: Int): NegotiatedTrack {
+    private suspend fun setup(
+        track: TrackInfo,
+        rtpChannel: Int,
+        rtcpChannel: Int,
+        transportHeader: String,
+    ): NegotiatedTrack {
         val controlUrl = absoluteControlUrl(track.controlUrl)
-        val transport = "RTP/AVP/TCP;unicast;interleaved=$rtpChannel-$rtcpChannel"
         val response = sendWithAuth { auth ->
-            RtspRequest.setup(controlUrl, ++cseq, transport, sessionId, auth)
+            RtspRequest.setup(controlUrl, ++cseq, transportHeader, sessionId, auth)
         }
         sessionId = response.sessionId ?: sessionId
             ?: throw RtspError.Protocol("SETUP response missing Session header")
         val negotiatedTransport = response.header("Transport") ?: ""
+        // For TCP-interleaved the server confirms (or remaps) the channel
+        // ids; for UDP we keep the synthetic 0/1/2/3 ids and don't need
+        // to parse the server_port pair (we listen on the client_port we
+        // advertised, which the camera echoed back).
         val (rtp, rtcp) = parseInterleaved(negotiatedTransport) ?: (rtpChannel to rtcpChannel)
         return NegotiatedTrack(
             info = track,
@@ -145,4 +168,20 @@ class RtspClient(
         val videoTrack: NegotiatedTrack,
         val audioTrack: NegotiatedTrack? = null,
     )
+
+    /**
+     * Strategy for the SETUP `Transport:` header. The TCP-interleaved
+     * default is built in; UDP usage is delegated to a custom builder
+     * supplied by the transport (which knows the local UDP ports it
+     * bound).
+     */
+    fun interface TransportBuilder {
+        fun build(rtpChannel: Int, rtcpChannel: Int): String
+
+        companion object {
+            val TCP_INTERLEAVED = TransportBuilder { rtp, rtcp ->
+                "RTP/AVP/TCP;unicast;interleaved=$rtp-$rtcp"
+            }
+        }
+    }
 }
