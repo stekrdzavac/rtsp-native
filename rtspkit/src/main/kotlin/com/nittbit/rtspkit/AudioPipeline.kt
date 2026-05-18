@@ -78,7 +78,7 @@ internal class G711Pipeline(
             AudioCodec.PCMA -> G711Decoder.decodeAlaw(au.payload)
             else -> return
         }
-        renderer.onPcm(pcm, track.clockRate, track.channels)
+        renderer.onPcm(pcm, track.clockRate, track.channels, rtpTs = au.ptsRtp)
     }
 
     override fun release() {}
@@ -103,7 +103,7 @@ internal class L16Pipeline(
     override fun feed(au: AccessUnit.Audio) {
         if (!started) return
         val pcm = L16Decoder.toLittleEndianPcm(au.payload)
-        renderer.onPcm(pcm, track.clockRate, track.channels)
+        renderer.onPcm(pcm, track.clockRate, track.channels, rtpTs = au.ptsRtp)
     }
 
     override fun release() {}

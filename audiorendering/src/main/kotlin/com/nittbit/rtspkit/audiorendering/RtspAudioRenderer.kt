@@ -2,7 +2,6 @@ package com.nittbit.rtspkit.audiorendering
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
 import com.nittbit.rtspkit.audiodecoder.AudioPcmSink
@@ -19,8 +18,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * [volume] in [0f, 1f]; [isMuted] short-circuits writes without disturbing
  * the underlying track.
+ *
+ * Pass an [AudioPresentationAnchor] to participate in A/V sync — the
+ * renderer will call it exactly once, on the first non-muted write to
+ * AudioTrack, with the PCM block's RTP timestamp and the current system
+ * time. AvSyncClock uses that as the presentation origin.
  */
-class RtspAudioRenderer : AudioPcmSink {
+class RtspAudioRenderer(
+    private val presentationAnchor: AudioPresentationAnchor? = null,
+) : AudioPcmSink {
 
     @Volatile var isMuted: Boolean = false
     @Volatile var volume: Float = 1.0f
@@ -30,14 +36,18 @@ class RtspAudioRenderer : AudioPcmSink {
         }
 
     private val released = AtomicBoolean(false)
+    private val anchored = AtomicBoolean(false)
     private var track: AudioTrack? = null
     private var currentSampleRate: Int = 0
     private var currentChannels: Int = 0
 
-    override fun onPcm(pcm: ShortArray, sampleRateHz: Int, channels: Int) {
+    override fun onPcm(pcm: ShortArray, sampleRateHz: Int, channels: Int, rtpTs: Long) {
         if (released.get()) return
         if (isMuted) return
         val t = ensureTrack(sampleRateHz, channels) ?: return
+        if (anchored.compareAndSet(false, true)) {
+            presentationAnchor?.onFirstPcmSubmitted(rtpTs, System.nanoTime())
+        }
         try {
             t.write(pcm, 0, pcm.size)
         } catch (e: Throwable) {

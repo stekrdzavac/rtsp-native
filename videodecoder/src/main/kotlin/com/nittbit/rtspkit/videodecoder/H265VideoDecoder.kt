@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class H265VideoDecoder(
     private val scope: CoroutineScope,
+    private val renderClock: VideoRenderClock? = null,
 ) {
     private val inputs = Channel<AccessUnit.Video>(capacity = 64)
     private val released = AtomicBoolean(false)
@@ -86,8 +87,7 @@ class H265VideoDecoder(
                 val buffer = codec.getInputBuffer(index) ?: continue
                 buffer.clear()
                 buffer.put(au.payload)
-                val ptsUs = (au.ptsRtp * 1_000_000L) / 90_000L
-                codec.queueInputBuffer(index, 0, au.payload.size, ptsUs, 0)
+                codec.queueInputBuffer(index, 0, au.payload.size, au.ptsRtp, 0)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "input loop ended: ${t.message}")
@@ -100,7 +100,12 @@ class H265VideoDecoder(
             while (!released.get()) {
                 val index = codec.dequeueOutputBuffer(info, 10_000L)
                 if (index >= 0) {
-                    codec.releaseOutputBuffer(index, true)
+                    val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
+                    if (renderAt != null) {
+                        codec.releaseOutputBuffer(index, renderAt)
+                    } else {
+                        codec.releaseOutputBuffer(index, true)
+                    }
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = codec.outputFormat
                     val w = newFormat.getIntegerOrNull(MediaFormat.KEY_WIDTH)

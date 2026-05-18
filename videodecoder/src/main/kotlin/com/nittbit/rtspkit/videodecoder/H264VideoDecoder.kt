@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class H264VideoDecoder(
     private val scope: CoroutineScope,
+    private val renderClock: VideoRenderClock? = null,
 ) {
 
     private val inputs = Channel<AccessUnit.Video>(capacity = 64)
@@ -100,8 +101,10 @@ class H264VideoDecoder(
                 val buffer = codec.getInputBuffer(index) ?: continue
                 buffer.clear()
                 buffer.put(au.payload)
-                val ptsUs = (au.ptsRtp * 1_000_000L) / 90_000L
-                codec.queueInputBuffer(index, 0, au.payload.size, ptsUs, 0)
+                // Use the raw RTP timestamp as MediaCodec's presentationTimeUs
+                // (it's just a pass-through tag). We recover it in the output
+                // loop to ask AvSyncClock when to render.
+                codec.queueInputBuffer(index, 0, au.payload.size, au.ptsRtp, 0)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "input loop ended: ${t.message}")
@@ -114,7 +117,12 @@ class H264VideoDecoder(
             while (!released.get()) {
                 val index = codec.dequeueOutputBuffer(info, 10_000L)
                 if (index >= 0) {
-                    codec.releaseOutputBuffer(index, true)
+                    val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
+                    if (renderAt != null) {
+                        codec.releaseOutputBuffer(index, renderAt)
+                    } else {
+                        codec.releaseOutputBuffer(index, true)
+                    }
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = codec.outputFormat
                     val w = newFormat.getIntegerOrNull(MediaFormat.KEY_WIDTH)

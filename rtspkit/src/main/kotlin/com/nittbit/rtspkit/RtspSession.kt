@@ -3,7 +3,7 @@ package com.nittbit.rtspkit
 import android.util.Log
 import android.view.Surface
 import com.nittbit.rtspkit.audiorendering.RtspAudioRenderer
-import com.nittbit.rtspkit.clocksync.ClockSync
+import com.nittbit.rtspkit.clocksync.AvSyncClock
 import com.nittbit.rtspkit.core.AudioCodec
 import com.nittbit.rtspkit.core.ReconnectPolicy
 import com.nittbit.rtspkit.core.RtcpPacket
@@ -71,14 +71,20 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private val _videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val videoSize: StateFlow<Pair<Int, Int>?> = _videoSize
 
+    /** A/V sync clock. Survives reconnects; anchored on first audio PCM. */
+    private val avSync: AvSyncClock = AvSyncClock()
+
     /** Mute / volume of audio output. Survives reconnects. */
-    val audioRenderer: RtspAudioRenderer = RtspAudioRenderer()
+    val audioRenderer: RtspAudioRenderer = RtspAudioRenderer(
+        presentationAnchor = avSync::anchorPresentation,
+    )
 
     private var transport: TcpInterleavedTransport? = null
     private var rtspClient: RtspClient? = null
     private var videoPipeline: VideoPipeline? = null
     private var audioPipeline: AudioPipeline? = null
-    private var clockSync: ClockSync? = null
+    private var videoClockRate: Int = 90_000
+    private var audioClockRate: Int = 0
 
     private val surfaceReady = CompletableDeferred<Surface>()
 
@@ -185,13 +191,13 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 tx.frames.filter { it.channel == 0 }.collect { handleVideoRtp(it) }
             }
             launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == 1 }.collect { handleRtcp(it) }
+                tx.frames.filter { it.channel == 1 }.collect { handleVideoRtcp(it) }
             }
             launch(Dispatchers.Default) {
                 tx.frames.filter { it.channel == 2 }.collect { handleAudioRtp(it) }
             }
             launch(Dispatchers.Default) {
-                tx.frames.filter { it.channel == 3 }.collect { /* audio RTCP ignored Stage 2 */ }
+                tx.frames.filter { it.channel == 3 }.collect { handleAudioRtcp(it) }
             }
 
             val handshake = client.handshake(videoOnly = config.videoOnly)
@@ -201,7 +207,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
             videoPipeline = buildVideoPipeline(videoInfo)
             audioPipeline = handshake.audioTrack?.let { buildAudioPipeline(it) }
-            clockSync = ClockSync(videoInfo.clockRate)
+            videoClockRate = videoInfo.clockRate
+            audioClockRate = audioInfo?.clockRate ?: 0
 
             Log.i(TAG, "waiting for Surface (timeout=${config.firstFrameTimeoutMs}ms)")
             val surface = withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
@@ -276,8 +283,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private fun buildVideoPipeline(track: TrackInfo.Video): VideoPipeline {
         val pl: VideoPipeline = when (track.codec) {
-            VideoCodec.H264 -> H264Pipeline(scope)
-            VideoCodec.H265 -> H265Pipeline(scope)
+            VideoCodec.H264 -> H264Pipeline(scope, avSync::systemTimeForVideoRtp)
+            VideoCodec.H265 -> H265Pipeline(scope, avSync::systemTimeForVideoRtp)
         }
         pl.seedFromSdp(track)
         return pl
@@ -326,11 +333,20 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         for (au in aus) pl.feed(au)
     }
 
-    private fun handleRtcp(frame: InterleavedFrame) {
-        val packets = RtcpPacket.parseAll(frame.payload)
-        val sync = clockSync ?: return
-        for (p in packets) {
-            if (p is RtcpPacket.SenderReport) sync.onSenderReport(p)
+    private fun handleVideoRtcp(frame: InterleavedFrame) {
+        for (p in RtcpPacket.parseAll(frame.payload)) {
+            if (p is RtcpPacket.SenderReport) {
+                avSync.onVideoSenderReport(p, videoClockRate)
+            }
+        }
+    }
+
+    private fun handleAudioRtcp(frame: InterleavedFrame) {
+        if (audioClockRate <= 0) return
+        for (p in RtcpPacket.parseAll(frame.payload)) {
+            if (p is RtcpPacket.SenderReport) {
+                avSync.onAudioSenderReport(p, audioClockRate)
+            }
         }
     }
 
@@ -367,7 +383,6 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         runCatching { transport?.close() }
         transport = null
         rtspClient = null
-        clockSync = null
     }
 
     /** Full cleanup on terminal stop / fail. */

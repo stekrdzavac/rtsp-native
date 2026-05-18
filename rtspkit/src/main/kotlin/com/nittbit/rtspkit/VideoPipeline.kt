@@ -8,6 +8,7 @@ import com.nittbit.rtspkit.h265.H265Depacketizer
 import com.nittbit.rtspkit.signaling.TrackInfo
 import com.nittbit.rtspkit.videodecoder.H264VideoDecoder
 import com.nittbit.rtspkit.videodecoder.H265VideoDecoder
+import com.nittbit.rtspkit.videodecoder.VideoRenderClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,7 +43,10 @@ internal interface VideoPipeline {
     fun release()
 }
 
-internal class H264Pipeline(private val scope: CoroutineScope) : VideoPipeline {
+internal class H264Pipeline(
+    private val scope: CoroutineScope,
+    private val renderClock: VideoRenderClock? = null,
+) : VideoPipeline {
     private val depacketizer = H264Depacketizer()
     private var decoder: H264VideoDecoder? = null
     private var started = false
@@ -67,7 +71,7 @@ internal class H264Pipeline(private val scope: CoroutineScope) : VideoPipeline {
         val p = depacketizer.parameterSets ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
-        val d = H264VideoDecoder(scope)
+        val d = H264VideoDecoder(scope, renderClock)
         d.start(sps, pps, surface)
         decoder = d
         started = true
@@ -85,7 +89,10 @@ internal class H264Pipeline(private val scope: CoroutineScope) : VideoPipeline {
     override fun release() { decoder?.release() }
 }
 
-internal class H265Pipeline(private val scope: CoroutineScope) : VideoPipeline {
+internal class H265Pipeline(
+    private val scope: CoroutineScope,
+    private val renderClock: VideoRenderClock? = null,
+) : VideoPipeline {
     private val depacketizer = H265Depacketizer()
     private var decoder: H265VideoDecoder? = null
     private var started = false
@@ -111,7 +118,7 @@ internal class H265Pipeline(private val scope: CoroutineScope) : VideoPipeline {
         val vps = p.vps ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
-        val d = H265VideoDecoder(scope)
+        val d = H265VideoDecoder(scope, renderClock)
         d.start(vps, sps, pps, surface)
         decoder = d
         started = true

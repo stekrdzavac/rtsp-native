@@ -70,8 +70,10 @@ class AacAudioDecoder(
                 val buffer = codec.getInputBuffer(index) ?: continue
                 buffer.clear()
                 buffer.put(au.payload)
-                val ptsUs = if (sampleRateHz > 0) (au.ptsRtp * 1_000_000L) / sampleRateHz else au.ptsRtp
-                codec.queueInputBuffer(index, 0, au.payload.size, ptsUs, 0)
+                // Pass-through the RTP timestamp via presentationTimeUs so
+                // the renderer (and AvSyncClock) can correlate the decoded
+                // PCM back to its source frame.
+                codec.queueInputBuffer(index, 0, au.payload.size, au.ptsRtp, 0)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "AAC input loop ended: ${t.message}")
@@ -90,7 +92,7 @@ class AacAudioDecoder(
                         out.limit(info.offset + info.size)
                         val pcm = ShortArray(info.size / 2)
                         out.order(java.nio.ByteOrder.nativeOrder()).asShortBuffer().get(pcm)
-                        sink.onPcm(pcm, sampleRateHz, channels)
+                        sink.onPcm(pcm, sampleRateHz, channels, rtpTs = info.presentationTimeUs)
                     }
                     codec.releaseOutputBuffer(index, false)
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
