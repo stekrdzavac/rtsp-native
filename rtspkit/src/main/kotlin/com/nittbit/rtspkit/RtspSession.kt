@@ -17,6 +17,7 @@ import com.nittbit.rtspkit.core.VideoCodec
 import com.nittbit.rtspkit.signaling.NegotiatedTrack
 import com.nittbit.rtspkit.signaling.RtspClient
 import com.nittbit.rtspkit.signaling.TrackInfo
+import java.io.File
 import com.nittbit.rtspkit.transport.InterleavedFrame
 import com.nittbit.rtspkit.transport.RtspTransport
 import com.nittbit.rtspkit.transport.TcpInterleavedTransport
@@ -35,6 +36,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -90,6 +92,10 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private var audioPipeline: AudioPipeline? = null
     private var videoClockRate: Int = 90_000
     private var audioClockRate: Int = 0
+    private var currentVideoTrack: TrackInfo.Video? = null
+    private var currentAudioTrack: TrackInfo.Audio? = null
+
+    @Volatile private var recorder: RtspRecorder? = null
 
     private val surfaceReady = CompletableDeferred<Surface>()
 
@@ -158,6 +164,65 @@ class RtspSession(private val config: RtspSessionConfiguration) {
      * surface isn't ready, or the platform copy fails.
      */
     suspend fun snapshot(): Bitmap? = snapshotter?.invoke()
+
+    /**
+     * Start recording the current stream to [file] as MP4. Returns the
+     * [RtspRecorder] handle so the caller can observe `state` and
+     * `bytesWritten`, or null if the session isn't in `Playing` state or
+     * the negotiated tracks are missing the parameter sets needed for
+     * the MP4 codec config (`sprop-*` fmtp values from SDP).
+     *
+     * Only one recording per session at a time. Calling again replaces
+     * the previous (and stops it).
+     */
+    suspend fun startRecording(file: File): RtspRecorder? {
+        if (_state.value !is RtspSessionState.Playing) return null
+        val video = currentVideoTrack ?: return null
+        val audio = currentAudioTrack
+
+        // Need width/height. Wait briefly if the decoder hasn't reported
+        // OUTPUT_FORMAT_CHANGED yet — usually arrives within ~200ms of
+        // Playing.
+        val size = _videoSize.value
+            ?: withTimeoutOrNull(2_000) { _videoSize.filterNotNull().first() }
+            ?: return null
+
+        // Parameter sets come from the depacketizer, NOT from the SDP
+        // TrackInfo: many cameras (notably Hikvision HEVC) ship them
+        // in-band via RTP instead of through sprop-vps/sps/pps fmtp.
+        // The depacketizer has them by Playing time.
+        val params = videoPipeline?.parameterSets() ?: run {
+            Log.w(TAG, "no video parameter sets yet; cannot start recording")
+            return null
+        }
+
+        recorder?.stop()
+        val rec = try {
+            RtspRecorder(
+                file = file,
+                videoCodec = video.codec,
+                videoClockRate = video.clockRate,
+                videoVps = params.vps,
+                videoSps = params.sps,
+                videoPps = params.pps,
+                audioTrackInfo = audio,
+                width = size.first,
+                height = size.second,
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "could not construct recorder", t)
+            return null
+        }
+        rec.start()
+        recorder = rec
+        return rec
+    }
+
+    /** Finalize any in-flight recording. Safe to call when not recording. */
+    fun stopRecording() {
+        recorder?.stop()
+        recorder = null
+    }
 
     private suspend fun runWithReconnect() {
         var attempt = 0
@@ -258,6 +323,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             audioPipeline = handshake.audioTrack?.let { buildAudioPipeline(it) }
             videoClockRate = videoInfo.clockRate
             audioClockRate = audioInfo?.clockRate ?: 0
+            currentVideoTrack = videoInfo
+            currentAudioTrack = audioInfo
 
             Log.i(TAG, "waiting for Surface (timeout=${config.firstFrameTimeoutMs}ms)")
             val surface = withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
@@ -414,6 +481,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             _statistics.value = _statistics.value.copy(
                 framesDecoded = _statistics.value.framesDecoded + 1,
             )
+            recorder?.onVideoAu(au)
             pl.feed(au)
         }
     }
@@ -426,7 +494,10 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         val aus = pl.depacketize(packet)
         if (aus.isEmpty()) return
         if (!pl.isStarted() && pl.canStart()) pl.start()
-        for (au in aus) pl.feed(au)
+        for (au in aus) {
+            recorder?.onAudioAu(au)
+            pl.feed(au)
+        }
     }
 
     private fun handleVideoRtcp(frame: InterleavedFrame) {
@@ -483,6 +554,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     /** Full cleanup on terminal stop / fail. */
     private fun cleanup() {
+        runCatching { recorder?.stop() }
+        recorder = null
         partialCleanup()
         runCatching { audioRenderer.release() }
     }

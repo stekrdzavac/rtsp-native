@@ -44,7 +44,21 @@ internal interface VideoPipeline {
 
     /** Cumulative count of access units dropped because the decoder's input queue was full. */
     val framesDropped: Long
+
+    /**
+     * Current parameter sets, sourced from SDP seed and/or in-band
+     * extraction by the depacketizer. Null until the depacketizer has
+     * seen them. By the time the session reaches Playing, this is
+     * populated (else the decoder couldn't have started).
+     */
+    fun parameterSets(): VideoParameterSetsSnapshot?
 }
+
+internal data class VideoParameterSetsSnapshot(
+    val vps: ByteArray? = null,
+    val sps: ByteArray,
+    val pps: ByteArray,
+)
 
 internal class H264Pipeline(
     private val scope: CoroutineScope,
@@ -92,6 +106,13 @@ internal class H264Pipeline(
     override fun release() { decoder?.release() }
 
     override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
+
+    override fun parameterSets(): VideoParameterSetsSnapshot? {
+        val p = depacketizer.parameterSets ?: return null
+        val sps = p.sps ?: return null
+        val pps = p.pps ?: return null
+        return VideoParameterSetsSnapshot(sps = sps, pps = pps)
+    }
 }
 
 internal class H265Pipeline(
@@ -141,6 +162,14 @@ internal class H265Pipeline(
     override fun release() { decoder?.release() }
 
     override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
+
+    override fun parameterSets(): VideoParameterSetsSnapshot? {
+        val p = depacketizer.parameterSets ?: return null
+        val vps = p.vps ?: return null
+        val sps = p.sps ?: return null
+        val pps = p.pps ?: return null
+        return VideoParameterSetsSnapshot(vps = vps, sps = sps, pps = pps)
+    }
 }
 
 private fun <T> CoroutineScope.launchCollect(

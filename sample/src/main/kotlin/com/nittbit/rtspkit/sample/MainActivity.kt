@@ -2,6 +2,7 @@ package com.nittbit.rtspkit.sample
 
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Space
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -10,12 +11,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -37,12 +41,17 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nittbit.rtspkit.RtspRecorder
 import com.nittbit.rtspkit.RtspSession
 import com.nittbit.rtspkit.RtspSessionConfiguration
 import com.nittbit.rtspkit.core.Credentials
 import com.nittbit.rtspkit.core.RtspSessionState
 import com.nittbit.rtspkit.videorendering.RtspVideoSurface
 import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val SAMPLE_H264_RTSP_URL =
     "rtsp://admin:Admin12345@192.168.0.203/Streaming/Channels/101?transportmode=unicast&profile=Profile_1"
@@ -73,7 +82,10 @@ private fun SampleScreen() {
     var mode by remember { mutableStateOf(Mode.Single) }
     var session by remember { mutableStateOf<RtspSession?>(null) }
     var lastSnapshot by remember { mutableStateOf<ImageBitmap?>(null) }
+    var recorder by remember { mutableStateOf<RtspRecorder?>(null) }
+    var lastRecordingPath by remember { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     val currentState = session?.state?.collectAsState()?.value ?: RtspSessionState.Idle
     val stats = session?.statistics?.collectAsState()?.value
@@ -99,6 +111,7 @@ private fun SampleScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -146,7 +159,8 @@ private fun SampleScreen() {
                     Button(
                         enabled = session == null,
                         onClick = {
-                            val creds = if (username.isNotBlank()) Credentials(username, password) else null
+                            val creds =
+                                if (username.isNotBlank()) Credentials(username, password) else null
                             val cfg = RtspSessionConfiguration(url = url, credentials = creds)
                             val newSession = RtspSession(cfg)
                             session = newSession
@@ -170,6 +184,40 @@ private fun SampleScreen() {
                             }
                         },
                     ) { Text("Snapshot") }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = session != null && currentState is RtspSessionState.Playing && recorder == null,
+                        onClick = {
+                            val s = session ?: return@Button
+                            coroutineScope.launch {
+                                val dir = context.getExternalFilesDir(null)
+                                    ?: context.filesDir
+                                val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                                val file = File(dir, "rtsp-$ts.mp4")
+                                recorder = s.startRecording(file)
+                                if (recorder != null) lastRecordingPath = file.absolutePath
+                            }
+                        },
+                    ) { Text("Record") }
+                    Button(
+                        enabled = recorder != null,
+                        onClick = {
+                            session?.stopRecording()
+                            recorder = null
+                        },
+                    ) { Text("Stop Rec") }
+                }
+
+                recorder?.let { rec ->
+                    val recState by rec.state.collectAsState()
+                    val recBytes by rec.bytesWritten.collectAsState()
+                    Text(
+                        "Recording (${recState.name}): ${recBytes / 1024} KB → ${rec.file.name}",
+                    )
+                } ?: lastRecordingPath?.let {
+                    Text("Last recording: $it")
                 }
 
                 val stateLabel = when (val s = currentState) {
@@ -227,6 +275,8 @@ private fun SampleScreen() {
                 password = password,
             )
         }
+
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }
 
