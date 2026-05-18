@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SampleScreen() {
-    var url by remember { mutableStateOf("rtsp://192.168.0.203/Streaming/Channels/101?transportmode=unicast&profile=Profile_1") }
+    var url by remember { mutableStateOf("rtsp://lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1") }
     var username by remember { mutableStateOf("admin") }
     var password by remember { mutableStateOf("Admin12345") }
     var session by remember { mutableStateOf<RtspSession?>(null) }

@@ -24,7 +24,7 @@ data class RtspSessionConfiguration(
     val firstFrameTimeoutMs: Int = 10_000,
     val keepaliveIntervalMs: Long = 30_000,
     val reconnect: ReconnectPolicy = ReconnectPolicy.Never,
-    val preferredVideoCodec: List<VideoCodec> = listOf(VideoCodec.H264),
+    val preferredVideoCodec: List<VideoCodec> = listOf(VideoCodec.H264, VideoCodec.H265),
     val preferredAudioCodec: List<AudioCodec> = listOf(AudioCodec.AAC, AudioCodec.PCMU, AudioCodec.PCMA),
     val bufferingPolicy: BufferingPolicy = BufferingPolicy.LowLatency,
 )

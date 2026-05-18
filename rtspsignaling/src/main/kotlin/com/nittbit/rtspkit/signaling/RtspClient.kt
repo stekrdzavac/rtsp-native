@@ -25,7 +25,8 @@ class RtspClient(
         if (playableTracks.isEmpty()) {
             throw RtspError.Protocol("no playable tracks in SDP")
         }
-        // Stage 1: video only — pick the first video track.
+        // Stage 1: video only — pick the first video track. Both H.264 and
+        // H.265 are accepted; the session picks the right pipeline downstream.
         val target = playableTracks.firstOrNull { it is TrackInfo.Video }
             ?: throw RtspError.Protocol("no video track in SDP")
 

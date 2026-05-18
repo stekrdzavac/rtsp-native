@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nittbit.rtspkit"
+    namespace = "com.nittbit.rtspkit.h265"
     compileSdk = 36
 
     defaultConfig {
@@ -22,16 +22,7 @@ android {
 
 dependencies {
     api(project(":rtspcore"))
-    api(project(":rtspsignaling"))
-    api(project(":rtsptransport"))
-    api(project(":h264depacketizer"))
-    api(project(":h265depacketizer"))
-    api(project(":clocksync"))
-    api(project(":videodecoder"))
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test)
-    testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.turbine)
 }

@@ -94,13 +94,24 @@ object Sdp {
             "H265", "HEVC" -> VideoCodec.H265
             else -> return null
         }
+        var vps: ByteArray? = null
         var sps: ByteArray? = null
         var pps: ByteArray? = null
-        val sprop = fmtp["sprop-parameter-sets"]
-        if (sprop != null && codec == VideoCodec.H264) {
-            val parts = sprop.split(',')
-            sps = parts.getOrNull(0)?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
-            pps = parts.getOrNull(1)?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+        when (codec) {
+            VideoCodec.H264 -> {
+                val sprop = fmtp["sprop-parameter-sets"]
+                if (sprop != null) {
+                    val parts = sprop.split(',')
+                    sps = parts.getOrNull(0)?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+                    pps = parts.getOrNull(1)?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+                }
+            }
+            VideoCodec.H265 -> {
+                // RFC 7798 §7.1: separate sprop fields per parameter set type.
+                vps = fmtp["sprop-vps"]?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+                sps = fmtp["sprop-sps"]?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+                pps = fmtp["sprop-pps"]?.takeIf { it.isNotEmpty() }?.let { Base64Decoder.decode(it) }
+            }
         }
         val mode = fmtp["packetization-mode"]?.toIntOrNull() ?: 1
         return TrackInfo.Video(
@@ -108,6 +119,7 @@ object Sdp {
             codec = codec,
             clockRate = if (clockRate > 0) clockRate else 90_000,
             controlUrl = control,
+            vps = vps,
             sps = sps,
             pps = pps,
             packetizationMode = mode,

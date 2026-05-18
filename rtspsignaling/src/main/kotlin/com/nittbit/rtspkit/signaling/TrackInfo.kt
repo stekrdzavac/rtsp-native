@@ -17,6 +17,7 @@ sealed class TrackInfo {
         val codec: VideoCodec,
         override val clockRate: Int,
         override val controlUrl: String,
+        val vps: ByteArray? = null,
         val sps: ByteArray? = null,
         val pps: ByteArray? = null,
         val packetizationMode: Int = 1,

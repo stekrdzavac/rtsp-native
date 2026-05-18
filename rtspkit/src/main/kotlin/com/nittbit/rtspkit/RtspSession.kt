@@ -3,23 +3,20 @@ package com.nittbit.rtspkit
 import android.util.Log
 import android.view.Surface
 import com.nittbit.rtspkit.clocksync.ClockSync
-import com.nittbit.rtspkit.core.AccessUnit
 import com.nittbit.rtspkit.core.RtcpPacket
 import com.nittbit.rtspkit.core.RtpPacket
 import com.nittbit.rtspkit.core.RtspError
 import com.nittbit.rtspkit.core.RtspSessionState
 import com.nittbit.rtspkit.core.SessionStatistics
-import com.nittbit.rtspkit.h264.H264Depacketizer
+import com.nittbit.rtspkit.core.VideoCodec
 import com.nittbit.rtspkit.signaling.RtspClient
 import com.nittbit.rtspkit.signaling.TrackInfo
 import com.nittbit.rtspkit.transport.InterleavedFrame
 import com.nittbit.rtspkit.transport.TcpInterleavedTransport
-import com.nittbit.rtspkit.videodecoder.H264VideoDecoder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,10 +29,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 
 /**
- * Public entry point for playing an RTSP/H.264 stream. Stage 1 supports
- * a single video track over TCP-interleaved transport. Construct →
- * [start] → attach a Surface (via [com.nittbit.rtspkit.videorendering.RtspVideoView])
- * → observe [state] and [statistics] → [stop].
+ * Public entry point for playing an RTSP/H.264 or RTSP/H.265 stream.
+ * Stage 1 + Stage 2 (H.265) support a single video track over
+ * TCP-interleaved transport. Construct → [start] → attach a Surface (via
+ * [com.nittbit.rtspkit.videorendering.RtspVideoView]) → observe [state]
+ * and [statistics] → [stop].
  *
  * The session owns its own coroutine scope. Calling [stop] (or any
  * unrecoverable error path) cancels it, closes the socket, and releases
@@ -62,8 +60,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private var transport: TcpInterleavedTransport? = null
     private var rtspClient: RtspClient? = null
-    private var decoder: H264VideoDecoder? = null
-    private var depacketizer: H264Depacketizer? = null
+    private var pipeline: VideoPipeline? = null
     private var clockSync: ClockSync? = null
 
     private val surfaceReady = CompletableDeferred<Surface>()
@@ -89,15 +86,12 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         if (!surfaceReady.isCompleted) {
             surfaceReady.complete(surface)
         } else {
-            decoder?.replaceSurface(surface)
+            pipeline?.replaceSurface(surface)
         }
     }
 
     fun detachSurface() {
         Log.i(TAG, "detachSurface")
-        // Stage 1: we keep the original Surface bound to the codec.
-        // Replacing with another surface (or releasing) is handled when
-        // a new Surface arrives via attachSurface, or on session stop.
     }
 
     private suspend fun runPipeline() {
@@ -114,17 +108,11 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             rtspClient = client
 
             _state.value = RtspSessionState.Negotiating
-            // We hand-pick interleaved channels 0/1 in handshake, so we can
-            // subscribe to them *before* PLAY runs and not lose RTP frames.
             val rtpChannel = 0
             val rtcpChannel = 1
 
-            val dpk = H264Depacketizer()
-            depacketizer = dpk
-
-            // Subscribe NOW, before PLAY is sent. The SharedFlow inside the
-            // transport buffers up to 512 frames; the filtered collectors
-            // start consuming as soon as they're scheduled.
+            // Pipeline is allocated lazily once we know the codec from SDP.
+            // Subscribe to RTP/RTCP NOW so frames after PLAY aren't lost.
             scope.launch(Dispatchers.Default) {
                 tx.frames
                     .filter { it.channel == rtpChannel }
@@ -139,38 +127,37 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             val handshake = client.handshake(videoOnly = true)
             val track = handshake.videoTrack
             val videoTrack = track.info as TrackInfo.Video
-            Log.i(TAG, "handshake complete: $videoTrack, channels rtp=${track.rtpChannel}/rtcp=${track.rtcpChannel}")
+            Log.i(TAG, "handshake complete: codec=${videoTrack.codec}, channels rtp=${track.rtpChannel}/rtcp=${track.rtcpChannel}")
 
-            videoTrack.sps?.let { sps -> videoTrack.pps?.let { pps -> dpk.seedParameterSets(sps, pps) } }
+            val pl: VideoPipeline = when (videoTrack.codec) {
+                VideoCodec.H264 -> H264Pipeline(scope)
+                VideoCodec.H265 -> H265Pipeline(scope)
+            }
+            pl.seedFromSdp(videoTrack)
+            pipeline = pl
+
             clockSync = ClockSync(videoTrack.clockRate)
 
-            // Wait for a Surface to be attached, then start the decoder.
             Log.i(TAG, "waiting for Surface (timeout=${config.firstFrameTimeoutMs}ms)")
             val surface = withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
                 surfaceReady.await()
             } ?: throw RtspError.Timeout("no Surface attached within ${config.firstFrameTimeoutMs}ms")
 
-            val dec = H264VideoDecoder(scope)
-            decoder = dec
-            val sps = dpk.parameterSets?.sps
-            val pps = dpk.parameterSets?.pps
-            if (sps != null && pps != null) {
-                Log.i(TAG, "starting decoder with SDP-derived SPS/PPS")
-                dec.start(sps, pps, surface)
+            if (pl.canStart()) {
+                Log.i(TAG, "starting ${videoTrack.codec} decoder with SDP-derived params")
+                pl.start(surface)
             }
 
-            // Surface decoder dimensions to consumers.
             scope.launch {
-                dec.dimensions.filterNotNull().collect { dims ->
-                    _videoSize.value = dims.width to dims.height
+                pl.dimensions.filterNotNull().collect { (w, h) ->
+                    _videoSize.value = w to h
                     _statistics.value = _statistics.value.copy(
-                        videoWidth = dims.width,
-                        videoHeight = dims.height,
+                        videoWidth = w,
+                        videoHeight = h,
                     )
                 }
             }
 
-            // Keepalive heartbeat.
             scope.launch(Dispatchers.IO) {
                 while (isActive) {
                     delay(config.keepaliveIntervalMs)
@@ -188,34 +175,26 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private fun handleRtp(frame: InterleavedFrame) {
         val packet = RtpPacket.parse(frame.payload) ?: return
-        val dpk = depacketizer ?: return
-        val aus = dpk.depacketize(packet)
+        val pl = pipeline ?: return
+        val aus = pl.depacketize(packet)
         if (aus.isEmpty()) return
 
-        var dec = decoder
-        if (dec == null || dec.dimensions.value == null) {
-            // Lazy-start when the surface AND in-band SPS/PPS arrive.
-            val params = dpk.parameterSets
-            val sps = params?.sps
-            val pps = params?.pps
+        if (!pl.isStarted() && pl.canStart()) {
+            // Lazy start when in-band parameter sets arrive (cameras whose
+            // SDP omits sprop-* parameter sets).
             val surface = if (surfaceReady.isCompleted) {
                 runCatching { surfaceReady.getCompleted() }.getOrNull()
             } else null
-            if (sps != null && pps != null && surface != null) {
-                if (dec == null) {
-                    dec = H264VideoDecoder(scope)
-                    decoder = dec
-                }
-                runCatching { dec.start(sps, pps, surface) }
+            if (surface != null) {
+                runCatching { pl.start(surface) }
             }
         }
-        val activeDec = decoder ?: return
 
         for (au in aus) {
             _statistics.value = _statistics.value.copy(
                 framesDecoded = _statistics.value.framesDecoded + 1,
             )
-            activeDec.feed(au)
+            pl.feed(au)
         }
     }
 
@@ -234,11 +213,10 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     }
 
     private fun cleanup() {
-        runCatching { decoder?.release() }
-        decoder = null
+        runCatching { pipeline?.release() }
+        pipeline = null
         runCatching { transport?.close() }
         transport = null
-        depacketizer = null
         rtspClient = null
         clockSync = null
     }

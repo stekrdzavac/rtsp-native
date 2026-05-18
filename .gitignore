@@ -16,3 +16,4 @@ local.properties
 /rtsptransport/build/
 /videodecoder/build/
 /videorendering/build/
+/h265depacketizer/build
