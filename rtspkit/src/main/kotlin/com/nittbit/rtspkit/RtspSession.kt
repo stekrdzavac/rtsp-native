@@ -1,5 +1,6 @@
 package com.nittbit.rtspkit
 
+import android.graphics.Bitmap
 import android.util.Log
 import android.view.Surface
 import com.nittbit.rtspkit.audiorendering.RtspAudioRenderer
@@ -139,6 +140,24 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     fun detachSurface() {
         Log.i(TAG, "detachSurface")
     }
+
+    @Volatile private var snapshotter: (suspend () -> Bitmap?)? = null
+
+    /**
+     * Registered by [com.nittbit.rtspkit.videorendering.RtspVideoView] when
+     * it attaches to this session. Cleared on detach. Null is a valid value
+     * (audio-only sessions, or sessions with no view yet).
+     */
+    fun setSnapshotter(snapshotter: (suspend () -> Bitmap?)?) {
+        this.snapshotter = snapshotter
+    }
+
+    /**
+     * Capture the currently displayed video frame to a Bitmap at the
+     * decoded video resolution. Returns null if no view is attached, the
+     * surface isn't ready, or the platform copy fails.
+     */
+    suspend fun snapshot(): Bitmap? = snapshotter?.invoke()
 
     private suspend fun runWithReconnect() {
         var attempt = 0

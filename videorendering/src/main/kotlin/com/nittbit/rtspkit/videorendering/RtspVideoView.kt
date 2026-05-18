@@ -1,20 +1,21 @@
 package com.nittbit.rtspkit.videorendering
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.AttributeSet
+import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.View
 import android.widget.FrameLayout
 import com.nittbit.rtspkit.RtspSession
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /**
  * The public video surface for an [RtspSession]. SurfaceView-backed for
@@ -54,6 +55,7 @@ class RtspVideoView @JvmOverloads constructor(
         if (surfaceView.holder.surface?.isValid == true) {
             session.attachSurface(surfaceView.holder.surface)
         }
+        session.setSnapshotter(::snapshot)
         val scope = MainScope()
         ownedScope = scope
         scope.launch {
@@ -65,10 +67,40 @@ class RtspVideoView @JvmOverloads constructor(
     }
 
     fun detach() {
+        session?.setSnapshotter(null)
         session?.detachSurface()
         session = null
         ownedScope?.cancel()
         ownedScope = null
+    }
+
+    /**
+     * Capture the latest decoded video frame into a Bitmap via
+     * [PixelCopy]. Output is at the native video resolution if known,
+     * else at the view's measured size. Returns null if the surface
+     * isn't ready or the platform copy fails.
+     */
+    suspend fun snapshot(): Bitmap? {
+        val surface = surfaceView.holder.surface
+        if (surface == null || !surface.isValid) return null
+        val (w, h) = videoSize ?: (surfaceView.width to surfaceView.height)
+        if (w <= 0 || h <= 0) return null
+
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        return suspendCancellableCoroutine { cont ->
+            val ht = HandlerThread("rtsp-snapshot").also { it.start() }
+            val handler = Handler(ht.looper)
+            PixelCopy.request(surfaceView, bitmap, { result ->
+                ht.quitSafely()
+                if (result == PixelCopy.SUCCESS) {
+                    cont.resume(bitmap)
+                } else {
+                    bitmap.recycle()
+                    cont.resume(null)
+                }
+            }, handler)
+            cont.invokeOnCancellation { ht.quitSafely() }
+        }
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
