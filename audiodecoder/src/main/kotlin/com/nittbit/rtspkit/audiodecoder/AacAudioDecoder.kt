@@ -10,6 +10,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * AAC hardware decoder backed by `MediaCodec(audio/mp4a-latm)`. Input is
@@ -31,6 +32,9 @@ class AacAudioDecoder(
     private var sampleRateHz: Int = 0
     private var channels: Int = 1
 
+    private val _framesDropped = AtomicLong(0)
+    val framesDropped: Long get() = _framesDropped.get()
+
     fun start(audioSpecificConfig: ByteArray, sampleRateHz: Int, channels: Int) {
         if (!started.compareAndSet(false, true)) return
         this.sampleRateHz = sampleRateHz
@@ -50,7 +54,10 @@ class AacAudioDecoder(
 
     fun feed(au: AccessUnit.Audio) {
         if (released.get()) return
-        inputs.trySend(au)
+        val result = inputs.trySend(au)
+        if (result.isFailure) {
+            _framesDropped.incrementAndGet()
+        }
     }
 
     fun release() {

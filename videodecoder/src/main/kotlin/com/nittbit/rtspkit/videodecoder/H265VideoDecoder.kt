@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * HEVC (H.265) hardware decoder backed by [MediaCodec]. Same lifecycle as
@@ -32,6 +33,9 @@ class H265VideoDecoder(
 
     private val _dimensions = MutableStateFlow<SpsParser.Dimensions?>(null)
     val dimensions: StateFlow<SpsParser.Dimensions?> = _dimensions
+
+    private val _framesDropped = AtomicLong(0)
+    val framesDropped: Long get() = _framesDropped.get()
 
     fun start(vpsNal: ByteArray, spsNal: ByteArray, ppsNal: ByteArray, surface: Surface) {
         if (!started.compareAndSet(false, true)) return
@@ -66,6 +70,7 @@ class H265VideoDecoder(
         if (released.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
+            _framesDropped.incrementAndGet()
             Log.w(TAG, "input buffer full, dropping AU ts=${au.ptsRtp}")
         }
     }

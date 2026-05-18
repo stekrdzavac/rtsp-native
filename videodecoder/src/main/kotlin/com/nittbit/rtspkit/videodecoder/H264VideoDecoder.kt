@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * H.264 hardware decoder backed by [MediaCodec]. Input is Annex-B AUs from
@@ -49,6 +50,9 @@ class H264VideoDecoder(
     private val _dimensions = MutableStateFlow<SpsParser.Dimensions?>(null)
     val dimensions: StateFlow<SpsParser.Dimensions?> = _dimensions
 
+    private val _framesDropped = AtomicLong(0)
+    val framesDropped: Long get() = _framesDropped.get()
+
     /**
      * Build the codec configuration from SDP-derived or in-band SPS/PPS
      * (RAW NAL bytes, no Annex-B start code) and bind it to [surface].
@@ -80,6 +84,7 @@ class H264VideoDecoder(
         if (released.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
+            _framesDropped.incrementAndGet()
             Log.w(TAG, "input buffer full, dropping AU ts=${au.ptsRtp}")
         }
     }

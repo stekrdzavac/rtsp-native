@@ -21,6 +21,8 @@ internal interface AudioPipeline {
     fun feed(au: AccessUnit.Audio)
     fun release()
     fun isStarted(): Boolean
+    /** Cumulative count of access units dropped because the decoder's input queue was full. */
+    val framesDropped: Long get() = 0L
 }
 
 internal class AacPipeline(
@@ -53,6 +55,8 @@ internal class AacPipeline(
     override fun feed(au: AccessUnit.Audio) { decoder?.feed(au) }
 
     override fun release() { decoder?.release() }
+
+    override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
 }
 
 /** PCMU / PCMA — pure-Kotlin lookup-table decode, no MediaCodec. */

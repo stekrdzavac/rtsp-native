@@ -41,6 +41,9 @@ internal interface VideoPipeline {
     fun replaceSurface(surface: Surface)
 
     fun release()
+
+    /** Cumulative count of access units dropped because the decoder's input queue was full. */
+    val framesDropped: Long
 }
 
 internal class H264Pipeline(
@@ -87,6 +90,8 @@ internal class H264Pipeline(
     override fun replaceSurface(surface: Surface) { decoder?.replaceSurface(surface) }
 
     override fun release() { decoder?.release() }
+
+    override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
 }
 
 internal class H265Pipeline(
@@ -134,6 +139,8 @@ internal class H265Pipeline(
     override fun replaceSurface(surface: Surface) { decoder?.replaceSurface(surface) }
 
     override fun release() { decoder?.release() }
+
+    override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
 }
 
 private fun <T> CoroutineScope.launchCollect(

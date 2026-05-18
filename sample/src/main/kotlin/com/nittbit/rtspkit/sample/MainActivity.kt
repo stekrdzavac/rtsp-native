@@ -123,7 +123,13 @@ private fun SampleScreen() {
             else -> s::class.simpleName ?: "Idle"
         }
         Text("State: $stateLabel")
-        stats?.let { Text("Frames decoded: ${it.framesDecoded}    ${it.videoWidth}x${it.videoHeight}") }
+        stats?.let {
+            val kbps = it.bitrateBps / 1000
+            Text(
+                "${it.videoWidth}x${it.videoHeight}  ${it.fps.toInt()}fps  ${kbps}kbps  " +
+                    "frames=${it.framesDecoded}  drops=${it.framesDropped}"
+            )
+        }
 
         Box(
             modifier = Modifier

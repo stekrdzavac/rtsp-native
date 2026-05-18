@@ -35,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 /**
@@ -92,6 +93,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     @Volatile private var lastRtpFrameAt: Long = 0
     @Volatile private var pipelineHealth: CompletableDeferred<Unit>? = null
     private var lifecycleJob: Job? = null
+
+    private val bytesReceived = AtomicLong(0)
 
     /** A stall is "much longer than the policy's user-facing stall timeout". */
     private val stallThresholdMs: Long
@@ -249,6 +252,35 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 }
             }
 
+            // 1Hz statistics sampler — computes fps from Δframes and
+            // bitrate from Δbytes over the last second.
+            launch {
+                var lastFrames = 0L
+                var lastBytes = 0L
+                bytesReceived.set(0)
+                while (isActive) {
+                    delay(1_000)
+                    if (_state.value !is RtspSessionState.Playing) {
+                        lastFrames = _statistics.value.framesDecoded
+                        lastBytes = bytesReceived.get()
+                        continue
+                    }
+                    val nowFrames = _statistics.value.framesDecoded
+                    val nowBytes = bytesReceived.get()
+                    val fps = (nowFrames - lastFrames).toFloat()
+                    val bitrateBps = (nowBytes - lastBytes) * 8L
+                    lastFrames = nowFrames
+                    lastBytes = nowBytes
+                    val drops = (videoPipeline?.framesDropped ?: 0L) +
+                        (audioPipeline?.framesDropped ?: 0L)
+                    _statistics.value = _statistics.value.copy(
+                        fps = fps,
+                        bitrateBps = bitrateBps,
+                        framesDropped = drops,
+                    )
+                }
+            }
+
             // Stall detector — only fires once Playing was reached and no
             // RTP frame has arrived in [stallThresholdMs].
             launch {
@@ -301,6 +333,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private fun handleVideoRtp(frame: InterleavedFrame) {
         lastRtpFrameAt = System.currentTimeMillis()
+        bytesReceived.addAndGet(frame.payload.size.toLong())
         val packet = RtpPacket.parse(frame.payload) ?: return
         val pl = videoPipeline ?: return
         val aus = pl.depacketize(packet)
@@ -325,6 +358,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
 
     private fun handleAudioRtp(frame: InterleavedFrame) {
         lastRtpFrameAt = System.currentTimeMillis()
+        bytesReceived.addAndGet(frame.payload.size.toLong())
         val packet = RtpPacket.parse(frame.payload) ?: return
         val pl = audioPipeline ?: return
         val aus = pl.depacketize(packet)
