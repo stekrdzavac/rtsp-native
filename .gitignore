@@ -8,3 +8,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+/clocksync/build/
+/h264depacketizer/build/
+/rtspcore/build/
+/rtspkit/build/
+/rtspsignaling/build/
+/rtsptransport/build/
+/videodecoder/build/
+/videorendering/build/

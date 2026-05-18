@@ -23,5 +23,13 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "rtsp-native"
-include(":app")
- 
+
+include(":rtspcore")
+include(":rtspsignaling")
+include(":rtsptransport")
+include(":h264depacketizer")
+include(":clocksync")
+include(":videodecoder")
+include(":videorendering")
+include(":rtspkit")
+include(":sample")
