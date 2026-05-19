@@ -42,6 +42,23 @@ android {
     }
 }
 
+val syncStreamsJsonToAssets by tasks.registering(Copy::class) {
+    from(layout.projectDirectory.file("streams.json"))
+    into(layout.buildDirectory.dir("generated/sample-assets"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addStaticSourceDirectory(
+            layout.buildDirectory.dir("generated/sample-assets").get().asFile.absolutePath
+        )
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncStreamsJsonToAssets)
+}
+
 dependencies {
     implementation(project(":rtsp"))
     implementation(project(":videorendering"))
