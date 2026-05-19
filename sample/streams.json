@@ -1,0 +1,22 @@
+[
+  {
+    "url": "rtsp://192.168.0.203/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+    "username": "admin",
+    "password": "Admin12345"
+  },
+  {
+    "url": "rtsp://lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+    "username": "admin",
+    "password": "Admin12345"
+  },
+  {
+    "url": "rtsp://lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+    "username": "admin",
+    "password": "Admin12345"
+  },
+  {
+    "url": "rtsp://lab.nittbit.com:60005/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+    "username": "admin",
+    "password": "Admin12345"
+  }
+]
