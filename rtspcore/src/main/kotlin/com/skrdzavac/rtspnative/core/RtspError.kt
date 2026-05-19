@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package com.skrdzavac.rtspnative.core
 
 sealed class RtspError(message: String, cause: Throwable? = null) : RuntimeException(message, cause) {

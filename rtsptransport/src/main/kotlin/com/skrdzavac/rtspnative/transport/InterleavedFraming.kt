@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package com.skrdzavac.rtspnative.transport
 
 import com.skrdzavac.rtspnative.core.RtspError
