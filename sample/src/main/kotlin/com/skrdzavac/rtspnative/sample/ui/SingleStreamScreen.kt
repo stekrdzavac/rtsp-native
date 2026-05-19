@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,6 +37,7 @@ import com.skrdzavac.rtspnative.RtspSession
 import com.skrdzavac.rtspnative.RtspSessionConfiguration
 import com.skrdzavac.rtspnative.core.Credentials
 import com.skrdzavac.rtspnative.core.RtspSessionState
+import com.skrdzavac.rtspnative.core.SessionStatistics
 import com.skrdzavac.rtspnative.sample.streams.StreamEntry
 import com.skrdzavac.rtspnative.videorendering.RtspVideoSurface
 import kotlinx.coroutines.launch
@@ -78,7 +81,10 @@ fun SingleStreamScreen(
     }
 
     Column(
-        modifier = modifier.fillMaxSize().padding(12.dp),
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Box(
@@ -152,7 +158,7 @@ fun SingleStreamScreen(
 
 private fun statusLine(
     state: RtspSessionState,
-    stats: com.skrdzavac.rtspnative.core.SessionStatistics,
+    stats: SessionStatistics,
 ): String {
     val stateLabel = when (state) {
         is RtspSessionState.Failed -> "Failed: ${state.error.message}"
