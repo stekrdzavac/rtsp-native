@@ -2,11 +2,25 @@
 
 package com.skrdzavac.rtspnative.sample.streams
 
+import android.content.Context
+import java.io.FileNotFoundException
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
 object StreamsLoader {
+
+    fun fromAssets(context: Context, fileName: String = "streams.json"): StreamsResult {
+        val text = try {
+            context.assets.open(fileName).bufferedReader().use { it.readText() }
+        } catch (e: FileNotFoundException) {
+            return StreamsResult.Error(
+                "No $fileName found in assets. Add $fileName at the sample " +
+                    "module root with [{\"url\":..., \"username\":..., \"password\":...}, ...]."
+            )
+        }
+        return parse(text)
+    }
 
     fun parse(json: String): StreamsResult {
         val array = try {
