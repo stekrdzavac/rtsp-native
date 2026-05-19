@@ -1,8 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
+}
+
+abstract class SyncStreamsJsonToAssets : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val src = sourceFile.get().asFile
+        val outDir = outputDirectory.get().asFile
+        outDir.mkdirs()
+        // Clean previous outputs to keep the directory exactly in sync.
+        outDir.listFiles()?.forEach { it.deleteRecursively() }
+        src.copyTo(outDir.resolve(src.name), overwrite = true)
+    }
 }
 
 android {
@@ -42,21 +70,17 @@ android {
     }
 }
 
-val syncStreamsJsonToAssets by tasks.registering(Copy::class) {
-    from(layout.projectDirectory.file("streams.json"))
-    into(layout.buildDirectory.dir("generated/sample-assets"))
+val syncStreamsJsonToAssets by tasks.registering(SyncStreamsJsonToAssets::class) {
+    sourceFile.set(layout.projectDirectory.file("streams.json"))
 }
 
 androidComponents {
     onVariants { variant ->
-        variant.sources.assets?.addStaticSourceDirectory(
-            layout.buildDirectory.dir("generated/sample-assets").get().asFile.absolutePath
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            syncStreamsJsonToAssets,
+            SyncStreamsJsonToAssets::outputDirectory,
         )
     }
-}
-
-tasks.named("preBuild") {
-    dependsOn(syncStreamsJsonToAssets)
 }
 
 dependencies {
