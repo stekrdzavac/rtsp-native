@@ -68,7 +68,7 @@ private fun SampleApp() {
         Screen.Grid -> {
             val entries = (streamsResult as? StreamsResult.Ok)?.entries.orEmpty()
             GridStreamScreen(
-                entries = entries.take(4),
+                entries = entries,
                 modifier = Modifier.fillMaxSize(),
             )
         }

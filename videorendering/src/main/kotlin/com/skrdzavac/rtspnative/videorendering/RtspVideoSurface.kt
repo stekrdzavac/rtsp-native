@@ -3,7 +3,6 @@
 package com.skrdzavac.rtspnative.videorendering
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import com.skrdzavac.rtspnative.RtspSession
@@ -15,6 +14,11 @@ import com.skrdzavac.rtspnative.RtspSession
  * ```
  * RtspVideoSurface(session = session, modifier = Modifier.fillMaxSize())
  * ```
+ *
+ * Reacts to [session] changes: if the caller swaps the session
+ * reference (e.g., switching camera profile), the underlying
+ * [SurfaceView] is reused and rebound to the new session — no view
+ * recreation, no surface flash.
  */
 @Composable
 fun RtspVideoSurface(
@@ -26,9 +30,11 @@ fun RtspVideoSurface(
         factory = { context ->
             RtspVideoView(context).apply { attach(session) }
         },
+        // factory only captures `session` at first inflation; this update
+        // block runs on every recomposition and rebinds when the session
+        // reference changes. attach() is cheap-idempotent for the
+        // same-session case.
+        update = { view -> view.attach(session) },
         onRelease = { it.detach() },
     )
-    DisposableEffect(session) {
-        onDispose { /* RtspVideoView.detach() handled via onRelease */ }
-    }
 }

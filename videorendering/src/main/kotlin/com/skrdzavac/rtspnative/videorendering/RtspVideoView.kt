@@ -51,7 +51,15 @@ class RtspVideoView @JvmOverloads constructor(
         })
     }
 
+    /**
+     * Bind this view to [session]. Safe to call repeatedly with the same
+     * session reference — subsequent calls are no-ops. Calling with a
+     * different session detaches the previous one and rebinds the
+     * underlying [SurfaceView] to the new session without recreating
+     * the surface (no black flash on profile switch / camera swap).
+     */
     fun attach(session: RtspSession) {
+        if (this.session === session) return
         detach()
         this.session = session
         if (surfaceView.holder.surface?.isValid == true) {

@@ -20,7 +20,7 @@ import com.skrdzavac.rtspnative.core.VideoCodec
 data class RtspSessionConfiguration(
     val url: String,
     val credentials: Credentials? = null,
-    val transport: TransportPreference = TransportPreference.Auto,
+    val transport: TransportPreference = TransportPreference.TcpInterleaved,
     val videoOnly: Boolean = false,
     val connectTimeoutMs: Int = 8_000,
     val firstFrameTimeoutMs: Int = 10_000,
