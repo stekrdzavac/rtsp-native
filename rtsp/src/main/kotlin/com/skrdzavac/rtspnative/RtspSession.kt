@@ -101,8 +101,11 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     @Volatile private var recorder: RtspRecorder? = null
 
     private val surfaceReady = CompletableDeferred<Surface>()
+    @Volatile private var currentSurface: Surface? = null
 
     @Volatile private var stopRequested = false
+    @Volatile private var explicitlyPaused = false
+    @Volatile private var surfaceAttached = false
     @Volatile private var lastRtpFrameAt: Long = 0
     @Volatile private var pipelineHealth: CompletableDeferred<Unit>? = null
     private var lifecycleJob: Job? = null
@@ -138,17 +141,67 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     }
 
     fun attachSurface(surface: Surface) {
-        Log.i(TAG, "attachSurface($surface)")
+        val wasDetached = !surfaceAttached
+        Log.i(TAG, "attachSurface($surface) wasDetached=$wasDetached")
+        currentSurface = surface
+        surfaceAttached = true
         if (!surfaceReady.isCompleted) {
             surfaceReady.complete(surface)
-        } else {
-            videoPipeline?.replaceSurface(surface)
+            return
+        }
+        // SurfaceView's surfaceChanged callback also lands here on every
+        // layout pass, even when the same surface stays valid. Only treat
+        // this as a "resume after loss" if we actually went through a
+        // detachSurface() — otherwise replaceSurface() alone is enough,
+        // and triggering resumeVideo() would needlessly tear down the
+        // running decoder and force a wait for the next keyframe.
+        videoPipeline?.replaceSurface(surface)
+        if (wasDetached && shouldRenderVideo()) {
+            Log.i(TAG, "resuming video after surface detach")
+            videoPipeline?.resumeVideo()
         }
     }
 
     fun detachSurface() {
         Log.i(TAG, "detachSurface")
+        surfaceAttached = false
+        currentSurface = null
+        videoPipeline?.pauseVideo()
     }
+
+    /**
+     * Suspend rendering of both video and audio while keeping the RTSP
+     * session, transport, and decoders configured. Use this to free up
+     * the rendering surface and audio output without paying the cost
+     * of reconnecting later. Idempotent.
+     *
+     * RTSP keepalive continues. Network bytes keep arriving — they
+     * just don't reach the screen / speaker until [resume].
+     */
+    fun pause() {
+        if (explicitlyPaused) return
+        explicitlyPaused = true
+        videoPipeline?.pauseVideo()
+        audioPipeline?.pauseAudio()
+        audioRenderer.pause()
+    }
+
+    /**
+     * Resume after [pause]. The video pipeline will drop AUs until the
+     * next IDR keyframe so the first rendered frame is self-contained;
+     * depending on the camera's GOP, expect up to a couple of seconds
+     * before video reappears. If no surface is currently attached,
+     * video stays paused until one is attached. Idempotent.
+     */
+    fun resume() {
+        if (!explicitlyPaused) return
+        explicitlyPaused = false
+        audioRenderer.resume()
+        audioPipeline?.resumeAudio()
+        if (shouldRenderVideo()) videoPipeline?.resumeVideo()
+    }
+
+    private fun shouldRenderVideo(): Boolean = surfaceAttached && !explicitlyPaused
 
     @Volatile private var snapshotter: (suspend () -> Bitmap?)? = null
 
@@ -330,12 +383,16 @@ class RtspSession(private val config: RtspSessionConfiguration) {
             currentAudioTrack = audioInfo
 
             Log.i(TAG, "waiting for Surface (timeout=${config.firstFrameTimeoutMs}ms)")
-            val surface = withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
+            withTimeoutOrNull(config.firstFrameTimeoutMs.toLong()) {
                 surfaceReady.await()
             } ?: throw RtspError.Timeout("no Surface attached within ${config.firstFrameTimeoutMs}ms")
 
             videoPipeline?.let { vp ->
-                if (vp.canStart()) {
+                // Use the latest known surface — the consumer may have
+                // already swapped it (e.g., Activity rotation) between
+                // surfaceReady completing and us getting here.
+                val surface = currentSurface
+                if (surface != null && vp.canStart() && shouldRenderVideo()) {
                     Log.i(TAG, "starting ${videoInfo.codec} decoder with SDP-derived params")
                     vp.start(surface)
                 }
@@ -351,6 +408,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 if (ap.canStart()) {
                     Log.i(TAG, "starting audio decoder (${audioInfo?.codec})")
                     ap.start()
+                    if (explicitlyPaused) ap.pauseAudio()
                 }
             }
 
@@ -472,10 +530,8 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         val aus = pl.depacketize(packet)
         if (aus.isEmpty()) return
 
-        if (!pl.isStarted() && pl.canStart()) {
-            val surface = if (surfaceReady.isCompleted) {
-                runCatching { surfaceReady.getCompleted() }.getOrNull()
-            } else null
+        if (!pl.isStarted() && pl.canStart() && shouldRenderVideo()) {
+            val surface = currentSurface
             if (surface != null) {
                 runCatching { pl.start(surface) }
             }

@@ -46,6 +46,7 @@ class H264VideoDecoder(
     private val inputs = Channel<AccessUnit.Video>(capacity = 64)
     private val released = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
 
     private var codec: MediaCodec? = null
 
@@ -82,8 +83,30 @@ class H264VideoDecoder(
         codec?.setOutputSurface(surface)
     }
 
+    /**
+     * Stop rendering and stop accepting input. The codec stays configured;
+     * the output loop continues to drain its queue with render=false so
+     * MediaCodec doesn't back-pressure (and so it tolerates the case where
+     * the bound Surface has just been destroyed). Idempotent.
+     */
+    fun pause() {
+        paused.set(true)
+    }
+
+    /**
+     * Re-prime the codec for the new surface. Drops any frames the codec
+     * had buffered while paused. The caller is expected to feed an IDR
+     * before any P/B frames — the pipeline guards that. Idempotent.
+     */
+    fun resume() {
+        if (released.get()) return
+        runCatching { codec?.flush() }
+        paused.set(false)
+    }
+
     fun feed(au: AccessUnit.Video) {
         if (released.get()) return
+        if (paused.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
             _framesDropped.incrementAndGet()
@@ -124,11 +147,18 @@ class H264VideoDecoder(
             while (!released.get()) {
                 val index = codec.dequeueOutputBuffer(info, 10_000L)
                 if (index >= 0) {
-                    val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
-                    if (renderAt != null) {
-                        codec.releaseOutputBuffer(index, renderAt)
+                    if (paused.get()) {
+                        // Surface may be gone — drop without rendering. Keeps
+                        // the codec's output queue draining so the decoder
+                        // doesn't back-pressure.
+                        codec.releaseOutputBuffer(index, false)
                     } else {
-                        codec.releaseOutputBuffer(index, true)
+                        val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
+                        if (renderAt != null) {
+                            codec.releaseOutputBuffer(index, renderAt)
+                        } else {
+                            codec.releaseOutputBuffer(index, true)
+                        }
                     }
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = codec.outputFormat

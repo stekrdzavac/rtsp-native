@@ -37,6 +37,8 @@ class RtspAudioRenderer(
             track?.setVolume(field)
         }
 
+    @Volatile private var paused: Boolean = false
+
     private val released = AtomicBoolean(false)
     private val anchored = AtomicBoolean(false)
     private var track: AudioTrack? = null
@@ -46,6 +48,7 @@ class RtspAudioRenderer(
     override fun onPcm(pcm: ShortArray, sampleRateHz: Int, channels: Int, rtpTs: Long) {
         if (released.get()) return
         if (isMuted) return
+        if (paused) return
         val t = ensureTrack(sampleRateHz, channels) ?: return
         if (anchored.compareAndSet(false, true)) {
             presentationAnchor?.onFirstPcmSubmitted(rtpTs, System.nanoTime())
@@ -55,6 +58,31 @@ class RtspAudioRenderer(
         } catch (e: Throwable) {
             Log.w(TAG, "AudioTrack.write failed: ${e.message}")
         }
+    }
+
+    /**
+     * Halt audio playback. Pending PCM in the AudioTrack buffer is kept;
+     * incoming PCM from [onPcm] is dropped while paused so the buffer
+     * doesn't block on write. Safe before the first frame has arrived.
+     */
+    @Synchronized
+    fun pause() {
+        if (released.get()) return
+        paused = true
+        runCatching { track?.pause() }
+    }
+
+    /**
+     * Resume after [pause]. Discards the AudioTrack's stale buffer
+     * (otherwise resume would play back audio from however long ago we
+     * paused) and restarts playback. Safe before the track exists.
+     */
+    @Synchronized
+    fun resume() {
+        if (released.get()) return
+        runCatching { track?.flush() }
+        runCatching { track?.play() }
+        paused = false
     }
 
     fun release() {

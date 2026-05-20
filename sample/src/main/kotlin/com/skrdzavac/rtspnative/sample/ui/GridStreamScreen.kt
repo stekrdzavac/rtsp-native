@@ -60,20 +60,20 @@ fun GridStreamScreen(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Spacer(modifier = Modifier.height(48.dp))
-        for (row in 0 until 2) {
+        for (row in 0 until 4) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                for (col in 0 until 2) {
-                    val index = row * 2 + col
+//                for (col in 0 until 2) {
+//                    val index = row * 2 + col
                     GridTile(
-                        session = sessions[index],
+                        session = sessions[row],
                         modifier = Modifier
                             .weight(1f)
                             .aspectRatio(16f / 9f),
                     )
-                }
+//                }
             }
         }
     }

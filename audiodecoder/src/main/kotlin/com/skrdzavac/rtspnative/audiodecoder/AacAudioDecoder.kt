@@ -29,6 +29,7 @@ class AacAudioDecoder(
     private val inputs = Channel<AccessUnit.Audio>(capacity = 64)
     private val released = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
 
     private var codec: MediaCodec? = null
     private var sampleRateHz: Int = 0
@@ -56,10 +57,21 @@ class AacAudioDecoder(
 
     fun feed(au: AccessUnit.Audio) {
         if (released.get()) return
+        if (paused.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
             _framesDropped.incrementAndGet()
         }
+    }
+
+    fun pause() {
+        paused.set(true)
+    }
+
+    fun resume() {
+        if (released.get()) return
+        runCatching { codec?.flush() }
+        paused.set(false)
     }
 
     fun release() {

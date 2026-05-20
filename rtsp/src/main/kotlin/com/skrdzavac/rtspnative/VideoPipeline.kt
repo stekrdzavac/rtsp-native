@@ -42,6 +42,26 @@ internal interface VideoPipeline {
 
     fun replaceSurface(surface: Surface)
 
+    /**
+     * Stop rendering. Releases the underlying MediaCodec so the next
+     * [resumeVideo] starts from a clean slate — this is significantly
+     * more reliable across devices than trying to keep the codec alive
+     * across a Surface destruction (some vendor decoders enter an
+     * unrecoverable state when the bound Surface goes away).
+     * Idempotent.
+     */
+    fun pauseVideo()
+
+    /**
+     * Resume after [pauseVideo]. Reconfigures the decoder against the
+     * surface most recently passed to [start] or [replaceSurface] and
+     * the latest SPS/PPS from the depacketizer, then drops every
+     * inbound AU until the next IDR keyframe so the first frame fed
+     * is a self-contained random-access point. Expect black until the
+     * camera emits its next keyframe (typically <1 GOP).
+     */
+    fun resumeVideo()
+
     fun release()
 
     /** Cumulative count of access units dropped because the decoder's input queue was full. */
@@ -62,6 +82,30 @@ internal data class VideoParameterSetsSnapshot(
     val pps: ByteArray,
 )
 
+/**
+ * Drops access units after the decoder has been (re)started until the
+ * next IDR keyframe.
+ *
+ * Why: a freshly configured MediaCodec must be primed with a
+ * self-contained random-access point. Feeding a P/B frame against
+ * an empty reference buffer either errors or renders garbage. Cameras
+ * emit keyframes on their GOP cadence, so we just wait for the next one.
+ */
+internal class IdrWaitGate {
+    @Volatile var awaitingKeyframe: Boolean = false
+        private set
+
+    fun arm() { awaitingKeyframe = true }
+
+    /** Returns true if [isKeyframe] AU should be passed to the decoder. */
+    fun shouldPass(isKeyframe: Boolean): Boolean {
+        if (!awaitingKeyframe) return true
+        if (!isKeyframe) return false
+        awaitingKeyframe = false
+        return true
+    }
+}
+
 internal class H264Pipeline(
     private val scope: CoroutineScope,
     private val renderClock: VideoRenderClock? = null,
@@ -69,6 +113,8 @@ internal class H264Pipeline(
     private val depacketizer = H264Depacketizer()
     private var decoder: H264VideoDecoder? = null
     private var started = false
+    @Volatile private var lastKnownSurface: Surface? = null
+    private val idrGate = IdrWaitGate()
     private val _dimensions = MutableStateFlow<Pair<Int, Int>?>(null)
     override val dimensions: StateFlow<Pair<Int, Int>?> = _dimensions
 
@@ -90,6 +136,11 @@ internal class H264Pipeline(
         val p = depacketizer.parameterSets ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
+        lastKnownSurface = surface
+        // A freshly configured codec needs a sync frame before it can
+        // decode anything else; arm even on initial start so cameras
+        // that don't sync PLAY to a GOP boundary don't feed garbage.
+        idrGate.arm()
         val d = H264VideoDecoder(scope, renderClock)
         d.start(sps, pps, surface)
         decoder = d
@@ -101,11 +152,34 @@ internal class H264Pipeline(
 
     override fun isStarted() = started
 
-    override fun feed(au: AccessUnit.Video) { decoder?.feed(au) }
+    override fun feed(au: AccessUnit.Video) {
+        if (!idrGate.shouldPass(au.isKeyframe)) return
+        decoder?.feed(au)
+    }
 
-    override fun replaceSurface(surface: Surface) { decoder?.replaceSurface(surface) }
+    override fun replaceSurface(surface: Surface) {
+        lastKnownSurface = surface
+        decoder?.replaceSurface(surface)
+    }
 
-    override fun release() { decoder?.release() }
+    override fun pauseVideo() {
+        decoder?.release()
+        decoder = null
+        started = false
+    }
+
+    override fun resumeVideo() {
+        if (started) return
+        val surface = lastKnownSurface ?: return
+        if (!canStart()) return
+        start(surface)
+    }
+
+    override fun release() {
+        decoder?.release()
+        decoder = null
+        started = false
+    }
 
     override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
 
@@ -124,6 +198,8 @@ internal class H265Pipeline(
     private val depacketizer = H265Depacketizer()
     private var decoder: H265VideoDecoder? = null
     private var started = false
+    @Volatile private var lastKnownSurface: Surface? = null
+    private val idrGate = IdrWaitGate()
     private val _dimensions = MutableStateFlow<Pair<Int, Int>?>(null)
     override val dimensions: StateFlow<Pair<Int, Int>?> = _dimensions
 
@@ -146,6 +222,8 @@ internal class H265Pipeline(
         val vps = p.vps ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
+        lastKnownSurface = surface
+        idrGate.arm()
         val d = H265VideoDecoder(scope, renderClock)
         d.start(vps, sps, pps, surface)
         decoder = d
@@ -157,11 +235,34 @@ internal class H265Pipeline(
 
     override fun isStarted() = started
 
-    override fun feed(au: AccessUnit.Video) { decoder?.feed(au) }
+    override fun feed(au: AccessUnit.Video) {
+        if (!idrGate.shouldPass(au.isKeyframe)) return
+        decoder?.feed(au)
+    }
 
-    override fun replaceSurface(surface: Surface) { decoder?.replaceSurface(surface) }
+    override fun replaceSurface(surface: Surface) {
+        lastKnownSurface = surface
+        decoder?.replaceSurface(surface)
+    }
 
-    override fun release() { decoder?.release() }
+    override fun pauseVideo() {
+        decoder?.release()
+        decoder = null
+        started = false
+    }
+
+    override fun resumeVideo() {
+        if (started) return
+        val surface = lastKnownSurface ?: return
+        if (!canStart()) return
+        start(surface)
+    }
+
+    override fun release() {
+        decoder?.release()
+        decoder = null
+        started = false
+    }
 
     override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
 

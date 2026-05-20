@@ -22,3 +22,4 @@ local.properties
 /audiodepacketizer/build
 /audiorendering/build
 /sample/streams.json
+/docs

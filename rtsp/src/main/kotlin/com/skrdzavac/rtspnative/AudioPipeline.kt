@@ -23,6 +23,14 @@ internal interface AudioPipeline {
     fun feed(au: AccessUnit.Audio)
     fun release()
     fun isStarted(): Boolean
+
+    /** Stop forwarding decoded PCM to the renderer. Idempotent. */
+    fun pauseAudio()
+
+    /** Resume forwarding decoded PCM. Flushes any MediaCodec-backed audio
+     *  decoder so input pre-pause doesn't surface as a stale click. Idempotent. */
+    fun resumeAudio()
+
     /** Cumulative count of access units dropped because the decoder's input queue was full. */
     val framesDropped: Long get() = 0L
 }
@@ -56,6 +64,10 @@ internal class AacPipeline(
 
     override fun feed(au: AccessUnit.Audio) { decoder?.feed(au) }
 
+    override fun pauseAudio() { decoder?.pause() }
+
+    override fun resumeAudio() { decoder?.resume() }
+
     override fun release() { decoder?.release() }
 
     override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
@@ -68,6 +80,7 @@ internal class G711Pipeline(
 ) : AudioPipeline {
     private val depacketizer: AudioDepacketizer = G711Depacketizer()
     private var started = false
+    @Volatile private var paused = false
 
     override fun depacketize(packet: RtpPacket) = depacketizer.depacketize(packet)
 
@@ -78,7 +91,7 @@ internal class G711Pipeline(
     override fun isStarted() = started
 
     override fun feed(au: AccessUnit.Audio) {
-        if (!started) return
+        if (!started || paused) return
         val pcm = when (track.codec) {
             AudioCodec.PCMU -> G711Decoder.decodeUlaw(au.payload)
             AudioCodec.PCMA -> G711Decoder.decodeAlaw(au.payload)
@@ -86,6 +99,10 @@ internal class G711Pipeline(
         }
         renderer.onPcm(pcm, track.clockRate, track.channels, rtpTs = au.ptsRtp)
     }
+
+    override fun pauseAudio() { paused = true }
+
+    override fun resumeAudio() { paused = false }
 
     override fun release() {}
 }
@@ -97,6 +114,7 @@ internal class L16Pipeline(
 ) : AudioPipeline {
     private val depacketizer: AudioDepacketizer = L16Depacketizer()
     private var started = false
+    @Volatile private var paused = false
 
     override fun depacketize(packet: RtpPacket) = depacketizer.depacketize(packet)
 
@@ -107,10 +125,14 @@ internal class L16Pipeline(
     override fun isStarted() = started
 
     override fun feed(au: AccessUnit.Audio) {
-        if (!started) return
+        if (!started || paused) return
         val pcm = L16Decoder.toLittleEndianPcm(au.payload)
         renderer.onPcm(pcm, track.clockRate, track.channels, rtpTs = au.ptsRtp)
     }
+
+    override fun pauseAudio() { paused = true }
+
+    override fun resumeAudio() { paused = false }
 
     override fun release() {}
 }

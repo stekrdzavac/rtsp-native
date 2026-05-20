@@ -30,6 +30,7 @@ class H265VideoDecoder(
     private val inputs = Channel<AccessUnit.Video>(capacity = 64)
     private val released = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
 
     private var codec: MediaCodec? = null
 
@@ -68,8 +69,21 @@ class H265VideoDecoder(
         codec?.setOutputSurface(surface)
     }
 
+    /** See [H264VideoDecoder.pause]. */
+    fun pause() {
+        paused.set(true)
+    }
+
+    /** See [H264VideoDecoder.resume]. */
+    fun resume() {
+        if (released.get()) return
+        runCatching { codec?.flush() }
+        paused.set(false)
+    }
+
     fun feed(au: AccessUnit.Video) {
         if (released.get()) return
+        if (paused.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
             _framesDropped.incrementAndGet()
@@ -107,11 +121,15 @@ class H265VideoDecoder(
             while (!released.get()) {
                 val index = codec.dequeueOutputBuffer(info, 10_000L)
                 if (index >= 0) {
-                    val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
-                    if (renderAt != null) {
-                        codec.releaseOutputBuffer(index, renderAt)
+                    if (paused.get()) {
+                        codec.releaseOutputBuffer(index, false)
                     } else {
-                        codec.releaseOutputBuffer(index, true)
+                        val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
+                        if (renderAt != null) {
+                            codec.releaseOutputBuffer(index, renderAt)
+                        } else {
+                            codec.releaseOutputBuffer(index, true)
+                        }
                     }
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = codec.outputFormat
