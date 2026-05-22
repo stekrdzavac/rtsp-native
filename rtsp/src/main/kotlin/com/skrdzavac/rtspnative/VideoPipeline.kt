@@ -109,9 +109,11 @@ internal class IdrWaitGate {
 internal class H264Pipeline(
     private val scope: CoroutineScope,
     private val renderClock: VideoRenderClock? = null,
+    private val jitterBufferMs: Int = 0,
 ) : VideoPipeline {
     private val depacketizer = H264Depacketizer()
     private var decoder: H264VideoDecoder? = null
+    private var jitterBuffer: VideoJitterBuffer? = null
     private var started = false
     @Volatile private var lastKnownSurface: Surface? = null
     private val idrGate = IdrWaitGate()
@@ -144,6 +146,13 @@ internal class H264Pipeline(
         val d = H264VideoDecoder(scope, renderClock)
         d.start(sps, pps, surface)
         decoder = d
+        jitterBuffer = if (jitterBufferMs > 0) {
+            VideoJitterBuffer(
+                scope = scope,
+                bufferDelayMs = jitterBufferMs,
+                output = { au -> d.feed(au) },
+            ).also { it.start() }
+        } else null
         started = true
         scope.launchCollect(d.dimensions) { dims ->
             dims?.let { _dimensions.value = it.width to it.height }
@@ -154,7 +163,8 @@ internal class H264Pipeline(
 
     override fun feed(au: AccessUnit.Video) {
         if (!idrGate.shouldPass(au.isKeyframe)) return
-        decoder?.feed(au)
+        val buf = jitterBuffer
+        if (buf != null) buf.submit(au) else decoder?.feed(au)
     }
 
     override fun replaceSurface(surface: Surface) {
@@ -163,6 +173,8 @@ internal class H264Pipeline(
     }
 
     override fun pauseVideo() {
+        jitterBuffer?.close()
+        jitterBuffer = null
         decoder?.release()
         decoder = null
         started = false
@@ -176,12 +188,15 @@ internal class H264Pipeline(
     }
 
     override fun release() {
+        jitterBuffer?.close()
+        jitterBuffer = null
         decoder?.release()
         decoder = null
         started = false
     }
 
-    override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
+    override val framesDropped: Long get() =
+        (decoder?.framesDropped ?: 0L) + (jitterBuffer?.framesDropped ?: 0L)
 
     override fun parameterSets(): VideoParameterSetsSnapshot? {
         val p = depacketizer.parameterSets ?: return null
@@ -194,9 +209,11 @@ internal class H264Pipeline(
 internal class H265Pipeline(
     private val scope: CoroutineScope,
     private val renderClock: VideoRenderClock? = null,
+    private val jitterBufferMs: Int = 0,
 ) : VideoPipeline {
     private val depacketizer = H265Depacketizer()
     private var decoder: H265VideoDecoder? = null
+    private var jitterBuffer: VideoJitterBuffer? = null
     private var started = false
     @Volatile private var lastKnownSurface: Surface? = null
     private val idrGate = IdrWaitGate()
@@ -227,6 +244,13 @@ internal class H265Pipeline(
         val d = H265VideoDecoder(scope, renderClock)
         d.start(vps, sps, pps, surface)
         decoder = d
+        jitterBuffer = if (jitterBufferMs > 0) {
+            VideoJitterBuffer(
+                scope = scope,
+                bufferDelayMs = jitterBufferMs,
+                output = { au -> d.feed(au) },
+            ).also { it.start() }
+        } else null
         started = true
         scope.launchCollect(d.dimensions) { dims ->
             dims?.let { _dimensions.value = it.width to it.height }
@@ -237,7 +261,8 @@ internal class H265Pipeline(
 
     override fun feed(au: AccessUnit.Video) {
         if (!idrGate.shouldPass(au.isKeyframe)) return
-        decoder?.feed(au)
+        val buf = jitterBuffer
+        if (buf != null) buf.submit(au) else decoder?.feed(au)
     }
 
     override fun replaceSurface(surface: Surface) {
@@ -246,6 +271,8 @@ internal class H265Pipeline(
     }
 
     override fun pauseVideo() {
+        jitterBuffer?.close()
+        jitterBuffer = null
         decoder?.release()
         decoder = null
         started = false
@@ -259,12 +286,15 @@ internal class H265Pipeline(
     }
 
     override fun release() {
+        jitterBuffer?.close()
+        jitterBuffer = null
         decoder?.release()
         decoder = null
         started = false
     }
 
-    override val framesDropped: Long get() = decoder?.framesDropped ?: 0L
+    override val framesDropped: Long get() =
+        (decoder?.framesDropped ?: 0L) + (jitterBuffer?.framesDropped ?: 0L)
 
     override fun parameterSets(): VideoParameterSetsSnapshot? {
         val p = depacketizer.parameterSets ?: return null

@@ -22,9 +22,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * the underlying track.
  *
  * Pass an [AudioPresentationAnchor] to participate in A/V sync — the
- * renderer will call it exactly once, on the first non-muted write to
- * AudioTrack, with the PCM block's RTP timestamp and the current system
- * time. AvSyncClock uses that as the presentation origin.
+ * renderer calls it on every non-muted PCM write until the anchor
+ * reports success (typically the second or third block, once the audio
+ * RTCP SR has landed). AvSyncClock uses that call as the presentation
+ * origin.
  */
 class RtspAudioRenderer(
     private val presentationAnchor: AudioPresentationAnchor? = null,
@@ -50,8 +51,13 @@ class RtspAudioRenderer(
         if (isMuted) return
         if (paused) return
         val t = ensureTrack(sampleRateHz, channels) ?: return
-        if (anchored.compareAndSet(false, true)) {
-            presentationAnchor?.onFirstPcmSubmitted(rtpTs, System.nanoTime())
+        if (!anchored.get()) {
+            // First audio PCM block often arrives before the camera's
+            // first RTCP SR, so the anchor can fail and must be retried.
+            // Latch only once it actually succeeds; otherwise the
+            // presentation timeline stays unset and video renders unpaced.
+            val ok = presentationAnchor?.onFirstPcmSubmitted(rtpTs, System.nanoTime()) ?: true
+            if (ok) anchored.set(true)
         }
         try {
             t.write(pcm, 0, pcm.size)

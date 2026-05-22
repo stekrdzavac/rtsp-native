@@ -66,10 +66,53 @@ class AvSyncClockTest {
     }
 
     @Test
-    fun `anchorPresentation is a no-op without an audio SR`() {
+    fun `anchorPresentation returns false and is a no-op without an audio SR`() {
         val clock = AvSyncClock()
-        clock.anchorPresentation(1000L, 5000L)
+        assertFalse(clock.anchorPresentation(1000L, 5000L))
         assertFalse(clock.isReady())
+    }
+
+    @Test
+    fun `anchorPresentation can succeed on retry after the audio SR arrives`() {
+        // Reproduces the production race: first audio PCM block reaches the
+        // renderer before the camera's first RTCP SR. The renderer keeps
+        // trying until anchoring succeeds.
+        val clock = AvSyncClock()
+        assertFalse(clock.anchorPresentation(audioRtpTs = 16_000L, sysTimeNs = 5_000_000L))
+
+        val ntp = encodeNtp(secondsSince1900 = 1_000L, fractionalSecond = 0.0)
+        clock.onAudioSenderReport(
+            RtcpPacket.SenderReport(2L, ntp, 16_000L, 0L, 0L),
+            clockRateHz = 16_000,
+        )
+        clock.onVideoSenderReport(
+            RtcpPacket.SenderReport(1L, ntp, 9_000_000L, 0L, 0L),
+            clockRateHz = 90_000,
+        )
+
+        assertTrue(clock.anchorPresentation(audioRtpTs = 16_000L, sysTimeNs = 5_000_000L))
+        assertTrue(clock.isReady())
+        assertEquals(5_000_000L, clock.systemTimeForVideoRtp(9_000_000L))
+    }
+
+    @Test
+    fun `anchorPresentation is idempotent once it has succeeded`() {
+        val clock = AvSyncClock()
+        val ntp = encodeNtp(secondsSince1900 = 1_000L, fractionalSecond = 0.0)
+        clock.onAudioSenderReport(
+            RtcpPacket.SenderReport(2L, ntp, 0L, 0L, 0L),
+            clockRateHz = 16_000,
+        )
+        clock.onVideoSenderReport(
+            RtcpPacket.SenderReport(1L, ntp, 0L, 0L, 0L),
+            clockRateHz = 90_000,
+        )
+
+        assertTrue(clock.anchorPresentation(audioRtpTs = 0L, sysTimeNs = 1_234L))
+        // A second call still reports success but the origin is unchanged —
+        // the first successful anchor wins.
+        assertTrue(clock.anchorPresentation(audioRtpTs = 99_999L, sysTimeNs = 9_999_999_999L))
+        assertEquals(1_234L, clock.systemTimeForVideoRtp(0L))
     }
 
     /** RTCP-style 64-bit NTP value from human-readable components. */

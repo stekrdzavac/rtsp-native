@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.skrdzavac.rtspnative.RtspSession
 import com.skrdzavac.rtspnative.RtspSessionConfiguration
+import com.skrdzavac.rtspnative.core.BufferingPolicy
 import com.skrdzavac.rtspnative.core.Credentials
 import com.skrdzavac.rtspnative.core.RtspSessionState
 import com.skrdzavac.rtspnative.sample.streams.StreamEntry
@@ -53,7 +54,13 @@ fun GridStreamScreen(
             val creds = if (entry.username.isNotBlank()) {
                 Credentials(entry.username, entry.password)
             } else null
-            RtspSession(RtspSessionConfiguration(url = entry.url, credentials = creds)).also {
+            RtspSession(
+                RtspSessionConfiguration(
+                    url = entry.url,
+                    credentials = creds,
+                    bufferingPolicy = BufferingPolicy.Balanced,
+                )
+            ).also {
                 it.audioRenderer.isMuted = true
                 it.start()
             }

@@ -40,6 +40,8 @@ class H265VideoDecoder(
     private val _framesDropped = AtomicLong(0)
     val framesDropped: Long get() = _framesDropped.get()
 
+    private val pacingLogged = AtomicBoolean(false)
+
     fun start(vpsNal: ByteArray, spsNal: ByteArray, ppsNal: ByteArray, surface: Surface) {
         if (!started.compareAndSet(false, true)) return
 
@@ -126,6 +128,9 @@ class H265VideoDecoder(
                     } else {
                         val renderAt = renderClock?.systemTimeNsForVideoRtp(info.presentationTimeUs)
                         if (renderAt != null) {
+                            if (pacingLogged.compareAndSet(false, true)) {
+                                Log.i(TAG, "video pacing engaged")
+                            }
                             codec.releaseOutputBuffer(index, renderAt)
                         } else {
                             codec.releaseOutputBuffer(index, true)

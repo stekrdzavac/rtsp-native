@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.skrdzavac.rtspnative.RtspRecorder
 import com.skrdzavac.rtspnative.RtspSession
 import com.skrdzavac.rtspnative.RtspSessionConfiguration
+import com.skrdzavac.rtspnative.core.BufferingPolicy
 import com.skrdzavac.rtspnative.core.Credentials
 import com.skrdzavac.rtspnative.core.RtspSessionState
 import com.skrdzavac.rtspnative.core.SessionStatistics
@@ -60,9 +61,13 @@ fun SingleStreamScreen(
         val creds = if (entry.username.isNotBlank()) {
             Credentials(entry.username, entry.password)
         } else null
-        RtspSession(RtspSessionConfiguration(url = entry.url, credentials = creds)).also {
-            it.start()
-        }
+        RtspSession(
+            RtspSessionConfiguration(
+                url = entry.url,
+                credentials = creds,
+                bufferingPolicy = BufferingPolicy.Balanced,
+            )
+        ).also { it.start() }
     }
 
     DisposableEffect(session) {

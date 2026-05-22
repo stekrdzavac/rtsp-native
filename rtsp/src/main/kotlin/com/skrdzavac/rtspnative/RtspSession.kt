@@ -504,9 +504,10 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         }
 
     private fun buildVideoPipeline(track: TrackInfo.Video): VideoPipeline {
+        val jitterMs = config.bufferingPolicy.jitterBufferMs
         val pl: VideoPipeline = when (track.codec) {
-            VideoCodec.H264 -> H264Pipeline(scope, avSync::systemTimeForVideoRtp)
-            VideoCodec.H265 -> H265Pipeline(scope, avSync::systemTimeForVideoRtp)
+            VideoCodec.H264 -> H264Pipeline(scope, avSync::systemTimeForVideoRtp, jitterMs)
+            VideoCodec.H265 -> H265Pipeline(scope, avSync::systemTimeForVideoRtp, jitterMs)
         }
         pl.seedFromSdp(track)
         return pl

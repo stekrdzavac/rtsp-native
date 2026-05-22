@@ -56,15 +56,21 @@ class AvSyncClock {
     }
 
     /**
-     * Anchor the presentation timeline. Call once when audio first hands a
-     * PCM block to AudioTrack — at [sysTimeNs] the playback is presenting
-     * the audio sample with RTP timestamp [audioRtpTs].
+     * Anchor the presentation timeline. Call when audio hands a PCM block
+     * to AudioTrack — at [sysTimeNs] the playback is presenting the audio
+     * sample with RTP timestamp [audioRtpTs].
+     *
+     * Returns true once the origin has been latched (or was already
+     * latched). Returns false if the audio RTCP SR has not arrived yet —
+     * the caller is expected to retry on the next PCM block. In practice
+     * the first PCM block beats the first SR by seconds.
      */
-    fun anchorPresentation(audioRtpTs: Long, sysTimeNs: Long) {
-        if (presentationOriginNs != Long.MIN_VALUE) return
-        val audio = audioAnchor ?: return
+    fun anchorPresentation(audioRtpTs: Long, sysTimeNs: Long): Boolean {
+        if (presentationOriginNs != Long.MIN_VALUE) return true
+        val audio = audioAnchor ?: return false
         val wallNs = audio.wallNs + (audioRtpTs - audio.rtpTs) * 1_000_000_000L / audio.clockRateHz
         presentationOriginNs = sysTimeNs - wallNs
+        return true
     }
 
     /**
