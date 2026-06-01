@@ -162,7 +162,17 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         }
     }
 
-    fun detachSurface() {
+    fun detachSurface(surface: Surface? = null) {
+        // Ignore stale detaches. During a grid<->fullscreen handoff a disposing
+        // view can fire detachSurface() AFTER the session has already been
+        // rebound to a newer view's surface; honoring it would null the live
+        // surface and pause the pipeline, freezing the tile. Only honor a
+        // detach for the surface that is actually current (or a null/legacy
+        // force-detach from internal teardown).
+        if (surface != null && currentSurface !== surface) {
+            Log.i(TAG, "detachSurface ignored (stale; not current)")
+            return
+        }
         Log.i(TAG, "detachSurface")
         surfaceAttached = false
         currentSurface = null

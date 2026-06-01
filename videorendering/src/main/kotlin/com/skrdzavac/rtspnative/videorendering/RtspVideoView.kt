@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.AttributeSet
 import android.view.PixelCopy
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.FrameLayout
@@ -34,19 +35,24 @@ class RtspVideoView @JvmOverloads constructor(
     private var session: RtspSession? = null
     private var ownedScope: CoroutineScope? = null
     private var videoSize: Pair<Int, Int>? = null
+    /** The surface this view last attached, so detach can be identity-checked. */
+    private var attachedSurface: Surface? = null
 
     init {
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
+                attachedSurface = holder.surface
                 session?.attachSurface(holder.surface)
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                attachedSurface = holder.surface
                 session?.attachSurface(holder.surface)
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                session?.detachSurface()
+                session?.detachSurface(holder.surface)
+                attachedSurface = null
             }
         })
     }
@@ -63,6 +69,7 @@ class RtspVideoView @JvmOverloads constructor(
         detach()
         this.session = session
         if (surfaceView.holder.surface?.isValid == true) {
+            attachedSurface = surfaceView.holder.surface
             session.attachSurface(surfaceView.holder.surface)
         }
         session.setSnapshotter(::snapshot)
@@ -78,7 +85,10 @@ class RtspVideoView @JvmOverloads constructor(
 
     fun detach() {
         session?.setSnapshotter(null)
-        session?.detachSurface()
+        // Pass the surface we own so the session ignores this detach if it has
+        // already been rebound to a newer view (grid<->fullscreen handoff).
+        attachedSurface?.let { session?.detachSurface(it) }
+        attachedSurface = null
         session = null
         ownedScope?.cancel()
         ownedScope = null
