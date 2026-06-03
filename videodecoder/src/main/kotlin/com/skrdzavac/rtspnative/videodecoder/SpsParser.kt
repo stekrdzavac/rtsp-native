@@ -19,7 +19,7 @@ object SpsParser {
      */
     fun parse(spsNal: ByteArray): Dimensions? {
         if (spsNal.size < 4) return null
-        val reader = BitReader(removeEmulationPrevention(spsNal), startOffset = 1)
+        val reader = NalBitReader(removeEmulationPrevention(spsNal), startOffset = 1)
         return runCatching {
             val profileIdc = reader.readBits(8)
             reader.readBits(8) // constraint_set + reserved
@@ -38,9 +38,15 @@ object SpsParser {
                 reader.readBits(1) // qpprime_y_zero_transform_bypass_flag
                 val seqScalingMatrixPresent = reader.readBits(1) == 1
                 if (seqScalingMatrixPresent) {
-                    // Stage 1: we don't actually need to walk the scaling matrix.
-                    // Skip it crudely by bailing — fallback used elsewhere.
-                    return null
+                    // High-profile cameras send scaling matrices. We don't use
+                    // the values, but we must walk past them to reach the pic
+                    // dimensions — bailing here would fall back to a wrong size
+                    // and brick static-buffer decoders (e.g. Unisoc) on 2K.
+                    val listCount = if (chromaFormatIdc != 3) 8 else 12
+                    for (i in 0 until listCount) {
+                        val listPresent = reader.readBits(1) == 1
+                        if (listPresent) skipScalingList(reader, if (i < 6) 16 else 64)
+                    }
                 }
             }
 
@@ -70,56 +76,19 @@ object SpsParser {
         }.getOrNull()
     }
 
-    /** Strip 0x000003 emulation prevention bytes per H.264 §7.4.1. */
-    private fun removeEmulationPrevention(input: ByteArray): ByteArray {
-        val out = ByteArray(input.size)
-        var w = 0
-        var i = 0
-        while (i < input.size) {
-            if (i + 2 < input.size && input[i] == 0.toByte() && input[i + 1] == 0.toByte() && input[i + 2] == 3.toByte()) {
-                out[w++] = 0
-                out[w++] = 0
-                i += 3
-            } else {
-                out[w++] = input[i++]
+    /**
+     * Walk a scaling_list( ) per H.264 §7.3.2.1.1.1 without retaining values.
+     * Reads delta_scale se(v) until the list is exhausted or nextScale hits 0.
+     */
+    private fun skipScalingList(reader: NalBitReader, size: Int) {
+        var lastScale = 8
+        var nextScale = 8
+        for (j in 0 until size) {
+            if (nextScale != 0) {
+                val deltaScale = reader.readSe()
+                nextScale = (lastScale + deltaScale + 256) % 256
             }
-        }
-        return out.copyOf(w)
-    }
-
-    private class BitReader(private val data: ByteArray, startOffset: Int = 0) {
-        private var bytePos = startOffset
-        private var bitPos = 0
-
-        fun readBits(n: Int): Int {
-            var value = 0
-            repeat(n) {
-                if (bytePos >= data.size) error("eof")
-                val bit = (data[bytePos].toInt() ushr (7 - bitPos)) and 1
-                value = (value shl 1) or bit
-                bitPos++
-                if (bitPos == 8) {
-                    bitPos = 0
-                    bytePos++
-                }
-            }
-            return value
-        }
-
-        fun readUe(): Int {
-            var zeros = 0
-            while (readBits(1) == 0) {
-                zeros++
-                if (zeros > 32) error("invalid ue")
-            }
-            if (zeros == 0) return 0
-            val suffix = readBits(zeros)
-            return (1 shl zeros) - 1 + suffix
-        }
-
-        fun readSe(): Int {
-            val ue = readUe()
-            return if (ue and 1 == 1) (ue + 1) / 2 else -(ue / 2)
+            lastScale = if (nextScale == 0) lastScale else nextScale
         }
     }
 }

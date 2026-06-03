@@ -2,6 +2,7 @@
 
 package com.skrdzavac.rtspnative
 
+import android.util.Log
 import android.view.Surface
 import com.skrdzavac.rtspnative.core.AccessUnit
 import com.skrdzavac.rtspnative.core.RtpPacket
@@ -15,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Codec-specific glue between RTP depacketizer and MediaCodec decoder.
@@ -112,9 +114,13 @@ internal class H264Pipeline(
     private val jitterBufferMs: Int = 0,
 ) : VideoPipeline {
     private val depacketizer = H264Depacketizer()
-    private var decoder: H264VideoDecoder? = null
-    private var jitterBuffer: VideoJitterBuffer? = null
-    private var started = false
+    @Volatile private var decoder: H264VideoDecoder? = null
+    @Volatile private var jitterBuffer: VideoJitterBuffer? = null
+    // Atomic: start() has two concurrent drivers — resumeVideo() on the main
+    // thread and RtspSession's late-start path on the RTP thread. Without an
+    // atomic guard both pass the started check and each creates a decoder,
+    // exhausting hardware instances (ENOMEM) and double-connecting the surface.
+    private val started = AtomicBoolean(false)
     @Volatile private var lastKnownSurface: Surface? = null
     private val idrGate = IdrWaitGate()
     private val _dimensions = MutableStateFlow<Pair<Int, Int>?>(null)
@@ -134,16 +140,19 @@ internal class H264Pipeline(
     }
 
     override fun start(surface: Surface) {
-        if (started) return
         val p = depacketizer.parameterSets ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
         lastKnownSurface = surface
+        // Claim the slot atomically: only one of the concurrent start() callers
+        // proceeds, the rest no-op. Reset by the teardown paths on stop/death.
+        if (!started.compareAndSet(false, true)) return
         // A freshly configured codec needs a sync frame before it can
         // decode anything else; arm even on initial start so cameras
         // that don't sync PLAY to a GOP boundary don't feed garbage.
         idrGate.arm()
         val d = H264VideoDecoder(scope, renderClock)
+        d.onError = { onDecoderError(d) }
         d.start(sps, pps, surface)
         decoder = d
         jitterBuffer = if (jitterBufferMs > 0) {
@@ -153,13 +162,12 @@ internal class H264Pipeline(
                 output = { au -> d.feed(au) },
             ).also { it.start() }
         } else null
-        started = true
         scope.launchCollect(d.dimensions) { dims ->
             dims?.let { _dimensions.value = it.width to it.height }
         }
     }
 
-    override fun isStarted() = started
+    override fun isStarted() = started.get()
 
     override fun feed(au: AccessUnit.Video) {
         if (!idrGate.shouldPass(au.isKeyframe)) return
@@ -177,14 +185,37 @@ internal class H264Pipeline(
         jitterBuffer = null
         decoder?.release()
         decoder = null
-        started = false
+        started.set(false)
     }
 
     override fun resumeVideo() {
-        if (started) return
+        if (started.get()) return
         val surface = lastKnownSurface ?: return
         if (!canStart()) return
         start(surface)
+    }
+
+    /**
+     * A decode loop died unexpectedly (a runtime codec error, or a
+     * configure/surface-connect failure on (re)start). Tear the dead codec
+     * down so [feed] stops piling onto a corpse and the pipeline is in a clean
+     * stopped state. We deliberately do NOT rebuild here: during grid recycling
+     * these failures are transient surface-handoff races, and a tight rebuild
+     * loop fights the SurfaceView for the producer connection (causing more
+     * failures) and would wrongly downgrade hardware streams to software.
+     * Recovery is driven by the next surface attach (resumeVideo), exactly as
+     * before — by then the surface has settled and a single clean start works.
+     */
+    private fun onDecoderError(failed: H264VideoDecoder) {
+        scope.launch {
+            if (decoder !== failed) return@launch
+            Log.w(TAG, "video decoder died; tearing down (recovery on next attach)")
+            jitterBuffer?.close()
+            jitterBuffer = null
+            decoder?.release()
+            decoder = null
+            started.set(false)
+        }
     }
 
     override fun release() {
@@ -192,7 +223,7 @@ internal class H264Pipeline(
         jitterBuffer = null
         decoder?.release()
         decoder = null
-        started = false
+        started.set(false)
     }
 
     override val framesDropped: Long get() =
@@ -204,6 +235,10 @@ internal class H264Pipeline(
         val pps = p.pps ?: return null
         return VideoParameterSetsSnapshot(sps = sps, pps = pps)
     }
+
+    private companion object {
+        const val TAG = "H264Pipeline"
+    }
 }
 
 internal class H265Pipeline(
@@ -212,9 +247,13 @@ internal class H265Pipeline(
     private val jitterBufferMs: Int = 0,
 ) : VideoPipeline {
     private val depacketizer = H265Depacketizer()
-    private var decoder: H265VideoDecoder? = null
-    private var jitterBuffer: VideoJitterBuffer? = null
-    private var started = false
+    @Volatile private var decoder: H265VideoDecoder? = null
+    @Volatile private var jitterBuffer: VideoJitterBuffer? = null
+    // Atomic: start() has two concurrent drivers — resumeVideo() on the main
+    // thread and RtspSession's late-start path on the RTP thread. Without an
+    // atomic guard both pass the started check and each creates a decoder,
+    // exhausting hardware instances (ENOMEM) and double-connecting the surface.
+    private val started = AtomicBoolean(false)
     @Volatile private var lastKnownSurface: Surface? = null
     private val idrGate = IdrWaitGate()
     private val _dimensions = MutableStateFlow<Pair<Int, Int>?>(null)
@@ -234,14 +273,16 @@ internal class H265Pipeline(
     }
 
     override fun start(surface: Surface) {
-        if (started) return
         val p = depacketizer.parameterSets ?: return
         val vps = p.vps ?: return
         val sps = p.sps ?: return
         val pps = p.pps ?: return
         lastKnownSurface = surface
+        // See H264Pipeline.start: atomic claim guards against double-start.
+        if (!started.compareAndSet(false, true)) return
         idrGate.arm()
         val d = H265VideoDecoder(scope, renderClock)
+        d.onError = { onDecoderError(d) }
         d.start(vps, sps, pps, surface)
         decoder = d
         jitterBuffer = if (jitterBufferMs > 0) {
@@ -251,13 +292,12 @@ internal class H265Pipeline(
                 output = { au -> d.feed(au) },
             ).also { it.start() }
         } else null
-        started = true
         scope.launchCollect(d.dimensions) { dims ->
             dims?.let { _dimensions.value = it.width to it.height }
         }
     }
 
-    override fun isStarted() = started
+    override fun isStarted() = started.get()
 
     override fun feed(au: AccessUnit.Video) {
         if (!idrGate.shouldPass(au.isKeyframe)) return
@@ -275,14 +315,27 @@ internal class H265Pipeline(
         jitterBuffer = null
         decoder?.release()
         decoder = null
-        started = false
+        started.set(false)
     }
 
     override fun resumeVideo() {
-        if (started) return
+        if (started.get()) return
         val surface = lastKnownSurface ?: return
         if (!canStart()) return
         start(surface)
+    }
+
+    /** See [H264Pipeline.onDecoderError]. */
+    private fun onDecoderError(failed: H265VideoDecoder) {
+        scope.launch {
+            if (decoder !== failed) return@launch
+            Log.w(TAG, "video decoder died; tearing down (recovery on next attach)")
+            jitterBuffer?.close()
+            jitterBuffer = null
+            decoder?.release()
+            decoder = null
+            started.set(false)
+        }
     }
 
     override fun release() {
@@ -290,7 +343,7 @@ internal class H265Pipeline(
         jitterBuffer = null
         decoder?.release()
         decoder = null
-        started = false
+        started.set(false)
     }
 
     override val framesDropped: Long get() =
@@ -302,6 +355,10 @@ internal class H265Pipeline(
         val sps = p.sps ?: return null
         val pps = p.pps ?: return null
         return VideoParameterSetsSnapshot(vps = vps, sps = sps, pps = pps)
+    }
+
+    private companion object {
+        const val TAG = "H265Pipeline"
     }
 }
 

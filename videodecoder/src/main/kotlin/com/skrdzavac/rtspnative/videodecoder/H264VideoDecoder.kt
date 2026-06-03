@@ -47,6 +47,15 @@ class H264VideoDecoder(
     private val released = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
+    private val failed = AtomicBoolean(false)
+
+    /**
+     * Invoked at most once when the codec dies unexpectedly (a decode loop
+     * terminates with an exception while not released). The pipeline uses this
+     * to rebuild the decoder. Set before [start].
+     */
+    @Volatile
+    var onError: (() -> Unit)? = null
 
     private var codec: MediaCodec? = null
 
@@ -62,27 +71,43 @@ class H264VideoDecoder(
      * Build the codec configuration from SDP-derived or in-band SPS/PPS
      * (RAW NAL bytes, no Annex-B start code) and bind it to [surface].
      */
-    fun start(spsNal: ByteArray, ppsNal: ByteArray, surface: Surface) {
+    fun start(spsNal: ByteArray, ppsNal: ByteArray, surface: Surface, preferSoftware: Boolean = false) {
         if (!started.compareAndSet(false, true)) return
         val dims = SpsParser.parse(spsNal) ?: SpsParser.Dimensions(width = 1920, height = 1080)
         _dimensions.value = dims
         Log.i(TAG, "configuring decoder ${dims.width}x${dims.height}")
 
-        val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, dims.width, dims.height).apply {
-            setByteBuffer("csd-0", ByteBuffer.wrap(byteArrayOf(0, 0, 0, 1) + spsNal))
-            setByteBuffer("csd-1", ByteBuffer.wrap(byteArrayOf(0, 0, 0, 1) + ppsNal))
+        try {
+            val c = VideoDecoderFactory.createForSize(
+                MediaFormat.MIMETYPE_VIDEO_AVC, dims.width, dims.height, preferSoftware,
+            )
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, dims.width, dims.height).apply {
+                setByteBuffer("csd-0", ByteBuffer.wrap(byteArrayOf(0, 0, 0, 1) + spsNal))
+                setByteBuffer("csd-1", ByteBuffer.wrap(byteArrayOf(0, 0, 0, 1) + ppsNal))
+            }
+            c.configure(format, surface, null, 0)
+            c.start()
+            codec = c
+            scope.launch(Dispatchers.IO) { inputLoop(c) }
+            scope.launch(Dispatchers.IO) { outputLoop(c) }
+            Log.i(TAG, "decoder started")
+        } catch (t: Throwable) {
+            // See H265VideoDecoder.start: route a configure/create failure
+            // through the bounded recovery instead of crashing the scope.
+            Log.w(TAG, "decoder start failed: ${t.message}")
+            runCatching { codec?.release() }
+            codec = null
+            notifyError()
         }
-        c.configure(format, surface, null, 0)
-        c.start()
-        codec = c
-        scope.launch(Dispatchers.IO) { inputLoop(c) }
-        scope.launch(Dispatchers.IO) { outputLoop(c) }
-        Log.i(TAG, "decoder started")
     }
 
     fun replaceSurface(surface: Surface) {
-        codec?.setOutputSurface(surface)
+        // setOutputSurface is only valid while the codec is Executing; a codec
+        // that has errored/released throws. Swallow it — the caller is a UI
+        // layout callback that must not crash, and a dead codec gets rebuilt
+        // on the next start().
+        runCatching { codec?.setOutputSurface(surface) }
+            .onFailure { Log.w(TAG, "replaceSurface ignored: ${it.message}") }
     }
 
     /**
@@ -107,7 +132,7 @@ class H264VideoDecoder(
     }
 
     fun feed(au: AccessUnit.Video) {
-        if (released.get()) return
+        if (released.get() || failed.get()) return
         if (paused.get()) return
         val result = inputs.trySend(au)
         if (result.isFailure) {
@@ -140,6 +165,7 @@ class H264VideoDecoder(
             }
         } catch (t: Throwable) {
             Log.w(TAG, "input loop ended: ${t.message}")
+            notifyError()
         }
     }
 
@@ -177,6 +203,14 @@ class H264VideoDecoder(
             }
         } catch (t: Throwable) {
             Log.w(TAG, "output loop ended: ${t.message}")
+            notifyError()
+        }
+    }
+
+    /** Fire [onError] once for an unexpected death (not a deliberate release). */
+    private fun notifyError() {
+        if (!released.get() && failed.compareAndSet(false, true)) {
+            onError?.invoke()
         }
     }
 
