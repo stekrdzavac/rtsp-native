@@ -89,8 +89,23 @@ class RtspVideoTextureView @JvmOverloads constructor(
         ownedScope = null
     }
 
-    /** Capture the latest decoded frame. TextureView readback is synchronous. */
-    private fun snapshot(): Bitmap? = textureView.bitmap
+    /**
+     * Capture the latest decoded frame at the native video resolution.
+     *
+     * The no-arg [TextureView.getBitmap] sizes the output to the on-screen
+     * view (so a fullscreen portrait view yields a portrait, non-16:9 frame).
+     * We instead read back into a bitmap sized to the decoded [videoSize], so
+     * the snapshot always matches the camera's real resolution and aspect
+     * ratio. Returns null until the SurfaceTexture is available and the
+     * decoder has reported its dimensions — callers retry.
+     */
+    private fun snapshot(): Bitmap? {
+        if (!textureView.isAvailable) return null
+        val (w, h) = videoSize ?: return null
+        if (w <= 0 || h <= 0) return null
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        return textureView.getBitmap(bitmap)
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val (videoWidth, videoHeight) = videoSize ?: run {
