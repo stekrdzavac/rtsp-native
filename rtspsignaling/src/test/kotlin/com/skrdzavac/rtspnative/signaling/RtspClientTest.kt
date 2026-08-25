@@ -3,9 +3,12 @@
 package com.skrdzavac.rtspnative.signaling
 
 import com.skrdzavac.rtspnative.core.Credentials
+import com.skrdzavac.rtspnative.core.RtspError
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class RtspClientTest {
@@ -76,6 +79,51 @@ class RtspClientTest {
         assertEquals("SETUP", channel.sent[3].method)
         // Fifth: PLAY
         assertEquals("PLAY", channel.sent[4].method)
+    }
+
+    /**
+     * Field case: an NVR under a simultaneous DESCRIBE burst answered one
+     * request with 500 while the rest succeeded. That is the server's own
+     * transient failure, so it must surface as a retryable error rather
+     * than a fatal protocol violation.
+     */
+    @Test
+    fun `5xx DESCRIBE is a transient server error`() = runBlocking {
+        val channel = ScriptedChannel(
+            responses = listOf(
+                response(200, "OK"),
+                response(500, "Internal Server Error"),
+            )
+        )
+        val client = RtspClient(channel = channel, baseUrl = "rtsp://cam.example/stream", credentials = null)
+
+        val e = assertFailsWith<RtspError.ServerError> { client.handshake(videoOnly = true) }
+        assertEquals(500, e.statusCode)
+        assertEquals("Internal Server Error", e.reason)
+        assertTrue(e.isRetryable)
+        assertEquals("DESCRIBE", channel.sent.last().method)
+    }
+
+    @Test
+    fun `501 and 505 stay fatal protocol errors`() = runBlocking {
+        for ((code, reason) in listOf(501 to "Not Implemented", 505 to "RTSP Version Not Supported")) {
+            val channel = ScriptedChannel(responses = listOf(response(200, "OK"), response(code, reason)))
+            val client = RtspClient(channel = channel, baseUrl = "rtsp://cam.example/stream", credentials = null)
+
+            val e = assertFailsWith<RtspError.Protocol> { client.handshake(videoOnly = true) }
+            assertEquals(code, e.statusCode)
+            assertFalse(e.isRetryable)
+        }
+    }
+
+    @Test
+    fun `4xx is a retryable protocol error carrying the status`() = runBlocking {
+        val channel = ScriptedChannel(responses = listOf(response(200, "OK"), response(404, "Not Found")))
+        val client = RtspClient(channel = channel, baseUrl = "rtsp://cam.example/stream", credentials = null)
+
+        val e = assertFailsWith<RtspError.Protocol> { client.handshake(videoOnly = true) }
+        assertEquals(404, e.statusCode)
+        assertTrue(e.isRetryable)
     }
 
     private fun response(

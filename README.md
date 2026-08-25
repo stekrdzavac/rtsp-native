@@ -22,7 +22,7 @@ The protocol layer (RTSP/RTP/RTCP/SDP) is hand-rolled in Kotlin on top of
 | RTSP control      | OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER (keepalive)   |
 | Auth              | Basic (RFC 7617), Digest MD5 / MD5-sess (RFC 7616 vector verified)    |
 | Transport         | TCP-interleaved (RFC 2326 §10.12), UDP unicast                        |
-| Reconnect         | Exponential backoff on stall, keepalive failure, or socket drop       |
+| Reconnect         | Exponential backoff on stall, keepalive failure, socket drop, or 5xx  |
 | A/V sync          | Cross-track via RTCP Sender Reports + audio-anchored presentation     |
 | Live stats        | fps, kbps, frames decoded, frames dropped, resolution                 |
 | Recording         | MP4 via `MediaMuxer`, no re-encode (Annex-B → AVCC remux)             |
@@ -141,6 +141,12 @@ val view = RtspVideoView(context).apply { attach(session) }
 - **`session.videoSize: StateFlow<Pair<Int, Int>?>`** — decoded video
   dimensions, populated after first OUTPUT_FORMAT_CHANGED from the
   decoder.
+- **`session.events: SharedFlow<RtspSessionEvent>`** — one-shot
+  notifications. `KeyframeNeeded` fires once per packet-loss episode when
+  video output is suppressed until the next IDR; a host with an
+  out-of-band channel to the camera (e.g. ONVIF `SetSynchronizationPoint`)
+  can request one to cut the freeze from a full GOP to a few hundred ms.
+  The library itself never talks ONVIF.
 - **`session.audioRenderer.isMuted`** / **`volume`** — runtime audio
   control. Survives reconnects.
 - **`session.snapshot(): Bitmap?`** — capture the current frame at
