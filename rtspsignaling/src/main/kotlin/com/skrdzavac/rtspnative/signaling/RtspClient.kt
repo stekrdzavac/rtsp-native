@@ -134,8 +134,16 @@ class RtspClient(
             }
         }
 
-        if (response.statusCode !in 200..299) {
-            throw RtspError.Protocol("RTSP ${request.method} -> ${response.statusCode} ${response.statusMessage}")
+        val code = response.statusCode
+        val describe = "RTSP ${request.method} -> $code ${response.statusMessage}"
+        when (code) {
+            in 200..299 -> Unit
+            // A retry cannot change these two answers; every other 5xx is
+            // the server's own transient failure (RFC 2326 §7.1.1).
+            RtspStatus.NOT_IMPLEMENTED, RtspStatus.VERSION_NOT_SUPPORTED ->
+                throw RtspError.Protocol(describe, statusCode = code)
+            in 500..599 -> throw RtspError.ServerError(code, response.statusMessage)
+            else -> throw RtspError.Protocol(describe, statusCode = code)
         }
         response.sessionId?.let { sessionId = it }
         return response

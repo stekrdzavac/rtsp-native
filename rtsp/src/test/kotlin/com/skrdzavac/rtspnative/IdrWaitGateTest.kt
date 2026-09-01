@@ -60,4 +60,21 @@ class IdrWaitGateTest {
         assertFalse(gate.shouldPass(isKeyframe = false))
         assertTrue(gate.shouldPass(isKeyframe = true))
     }
+
+    @Test
+    fun `arm reports only the open to closed edge`() {
+        val gate = IdrWaitGate()
+        assertTrue(gate.arm())
+        assertFalse(gate.arm())
+        assertFalse(gate.arm())
+
+        // Still closed: a delta frame does not reopen it.
+        gate.shouldPass(isKeyframe = false)
+        assertFalse(gate.arm())
+
+        // Reopened by a keyframe, so the next arm is a fresh edge.
+        assertTrue(gate.shouldPass(isKeyframe = true))
+        assertTrue(gate.arm())
+        assertFalse(gate.arm())
+    }
 }

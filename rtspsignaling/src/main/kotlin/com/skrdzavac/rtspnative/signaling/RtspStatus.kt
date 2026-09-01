@@ -16,4 +16,5 @@ object RtspStatus {
     const val UNSUPPORTED_TRANSPORT = 461
     const val INTERNAL_SERVER_ERROR = 500
     const val NOT_IMPLEMENTED = 501
+    const val VERSION_NOT_SUPPORTED = 505
 }

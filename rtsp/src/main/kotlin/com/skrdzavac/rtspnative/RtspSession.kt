@@ -12,6 +12,7 @@ import com.skrdzavac.rtspnative.core.ReconnectPolicy
 import com.skrdzavac.rtspnative.core.RtcpPacket
 import com.skrdzavac.rtspnative.core.RtpPacket
 import com.skrdzavac.rtspnative.core.RtspError
+import com.skrdzavac.rtspnative.core.RtspSessionEvent
 import com.skrdzavac.rtspnative.core.RtspSessionState
 import com.skrdzavac.rtspnative.core.SessionStatistics
 import com.skrdzavac.rtspnative.core.TransportPreference
@@ -35,7 +36,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
@@ -59,8 +63,9 @@ import kotlin.random.Random
  *
  * On detection: partial-cleanup (transport + decoders released, the
  * audio renderer is kept so the AudioTrack is reused), wait per backoff,
- * try again. Authentication failures and explicit `stop()` short-circuit
- * retry.
+ * try again. Authentication failures, 501/505 replies and explicit
+ * `stop()` short-circuit retry (see [RtspError.isRetryable]); a 5xx is the
+ * server's own transient failure and reconnects like a network drop.
  */
 class RtspSession(private val config: RtspSessionConfiguration) {
 
@@ -81,6 +86,13 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private val _videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val videoSize: StateFlow<Pair<Int, Int>?> = _videoSize
 
+    private val _events = MutableSharedFlow<RtspSessionEvent>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    /** One-shot notifications; see [RtspSessionEvent]. Missed while unobserved. */
+    val events: SharedFlow<RtspSessionEvent> = _events
+
     /** A/V sync clock. Survives reconnects; anchored on first audio PCM. */
     private val avSync: AvSyncClock = AvSyncClock()
 
@@ -92,6 +104,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private var transport: RtspTransport? = null
     private var rtspClient: RtspClient? = null
     private var videoPipeline: VideoPipeline? = null
+    private var videoSequence = RtpSequenceTracker()
     private var audioPipeline: AudioPipeline? = null
     private var videoClockRate: Int = 90_000
     private var audioClockRate: Int = 0
@@ -303,12 +316,13 @@ class RtspSession(private val config: RtspSessionConfiguration) {
                 throw e
             } catch (e: RtspError.Cancelled) {
                 return
-            } catch (e: RtspError.Auth) {
-                Log.i(TAG, "auth failed; not reconnecting")
-                fail(e)
-                return
             } catch (e: Throwable) {
                 if (stopRequested) return
+                if (e is RtspError && !e.isRetryable) {
+                    Log.i(TAG, "not reconnecting: ${e.message}")
+                    fail(e)
+                    return
+                }
                 attempt++
                 partialCleanup()
                 val backoff = nextBackoff(attempt) ?: run {
@@ -538,6 +552,10 @@ class RtspSession(private val config: RtspSessionConfiguration) {
         bytesReceived.addAndGet(frame.payload.size.toLong())
         val packet = RtpPacket.parse(frame.payload) ?: return
         val pl = videoPipeline ?: return
+        if (videoSequence.onPacket(packet.sequenceNumber) && pl.onPacketLoss()) {
+            Log.i(TAG, "video packet loss at seq ${packet.sequenceNumber}; waiting for keyframe")
+            _events.tryEmit(RtspSessionEvent.KeyframeNeeded)
+        }
         val aus = pl.depacketize(packet)
         if (aus.isEmpty()) return
 
@@ -616,6 +634,7 @@ class RtspSession(private val config: RtspSessionConfiguration) {
     private fun partialCleanup() {
         runCatching { videoPipeline?.release() }
         videoPipeline = null
+        videoSequence = RtpSequenceTracker()
         runCatching { audioPipeline?.release() }
         audioPipeline = null
         runCatching { transport?.close() }

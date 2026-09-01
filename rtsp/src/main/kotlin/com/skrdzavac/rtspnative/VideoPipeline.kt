@@ -42,6 +42,13 @@ internal interface VideoPipeline {
 
     fun feed(au: AccessUnit.Video)
 
+    /**
+     * An RTP packet of this stream was lost. Suppresses output until the
+     * next IDR. Returns true when this call started a new loss episode,
+     * i.e. output was not already suppressed.
+     */
+    fun onPacketLoss(): Boolean
+
     fun replaceSurface(surface: Surface)
 
     /**
@@ -97,7 +104,16 @@ internal class IdrWaitGate {
     @Volatile var awaitingKeyframe: Boolean = false
         private set
 
-    fun arm() { awaitingKeyframe = true }
+    /**
+     * Returns true only when this call transitioned open -> closed. Loss is
+     * reported per packet; the edge is what lets the host act once per
+     * loss episode.
+     */
+    fun arm(): Boolean {
+        if (awaitingKeyframe) return false
+        awaitingKeyframe = true
+        return true
+    }
 
     /** Returns true if [isKeyframe] AU should be passed to the decoder. */
     fun shouldPass(isKeyframe: Boolean): Boolean {
@@ -174,6 +190,8 @@ internal class H264Pipeline(
         val buf = jitterBuffer
         if (buf != null) buf.submit(au) else decoder?.feed(au)
     }
+
+    override fun onPacketLoss(): Boolean = idrGate.arm()
 
     override fun replaceSurface(surface: Surface) {
         lastKnownSurface = surface
@@ -304,6 +322,8 @@ internal class H265Pipeline(
         val buf = jitterBuffer
         if (buf != null) buf.submit(au) else decoder?.feed(au)
     }
+
+    override fun onPacketLoss(): Boolean = idrGate.arm()
 
     override fun replaceSurface(surface: Surface) {
         lastKnownSurface = surface

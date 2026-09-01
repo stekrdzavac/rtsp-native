@@ -122,6 +122,8 @@ The library's public entry points (anything outside these is internal):
 - `RtspVideoView` / `RtspTextureView` — view to `attach(session)`
 - `RtspAudioRenderer` — audio output sink
 - `SessionStatistics` — live frame-rate, bitrate, resolution flow
+- `RtspSessionEvent` — one-shot `events` flow (`KeyframeNeeded` on packet
+  loss); the library reports the need, the host decides how to ask the camera
 
 The sample app (`sample/`) is the reference for how to wire these together.
 
